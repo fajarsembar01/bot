@@ -6,12 +6,14 @@ Auto beli tiket setelah masuk widget Loket
 import time
 import sys
 import random
+import re
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import WebDriverException, TimeoutException
+from selenium.webdriver.support.ui import Select
 from webdriver_manager.chrome import ChromeDriverManager
 
 
@@ -692,19 +694,41 @@ class SimpleButtonBot:
         auto_buy = input("\n🤖 Ingin bot auto beli tiket? (y/n): ").strip().lower()
         
         if auto_buy == 'y':
-            # Input jenis tiket
-            print("\n📋 Kategori tiket yang tersedia (contoh):")
-            print("   - FANTASY VIP A PACKAGE")
-            print("   - FANTASY VIP B PACKAGE")
-            print("   - ORANGE A")
-            print("   - ORANGE B")
-            print("   - YELLOW")
-            print("   - PINK B")
+            # Pilih kategori tiket dengan nomor
+            self.random_delay(1, 2)
+            ticket_categories = self._collect_ticket_categories()
             
-            ticket_category = input("\n🎫 Masukkan nama kategori tiket yang ingin dibeli: ").strip()
-            if not ticket_category:
-                print("❌ Kategori tiket tidak boleh kosong!")
-                return
+            if ticket_categories:
+                print("\n📋 Daftar kategori tiket (pilih nomor):")
+                for idx, name in enumerate(ticket_categories, 1):
+                    print(f"   {idx}. {name}")
+                
+                choice = input("\n🎫 Masukkan nomor kategori tiket: ").strip()
+                if not choice.isdigit():
+                    print("❌ Input harus angka sesuai daftar!")
+                    return
+                
+                choice_idx = int(choice)
+                if choice_idx < 1 or choice_idx > len(ticket_categories):
+                    print("❌ Nomor kategori tidak valid!")
+                    return
+                
+                ticket_category = ticket_categories[choice_idx - 1]
+                print(f"✅ Dipilih: {ticket_category}")
+            else:
+                # Fallback manual jika daftar tidak terbaca
+                print("\n📋 Kategori tiket yang tersedia (contoh):")
+                print("   - FANTASY VIP A PACKAGE")
+                print("   - FANTASY VIP B PACKAGE")
+                print("   - ORANGE A")
+                print("   - ORANGE B")
+                print("   - YELLOW")
+                print("   - PINK B")
+                
+                ticket_category = input("\n🎫 Masukkan nama kategori tiket yang ingin dibeli: ").strip()
+                if not ticket_category:
+                    print("❌ Kategori tiket tidak boleh kosong!")
+                    return
             
             # Input jumlah tiket
             try:
@@ -783,6 +807,198 @@ class SimpleButtonBot:
                 print(f"   ⚠️ Error: {e}")
                 self.random_delay(2, 3)
     
+    def _extract_first_int(self, text):
+        """Ambil angka pertama dari string"""
+        try:
+            match = re.search(r"\d+", str(text))
+            if not match:
+                return None
+            return int(match.group(0))
+        except:
+            return None
+
+    def _looks_like_price(self, text):
+        """Deteksi teks yang terlihat seperti harga"""
+        try:
+            text_lower = str(text).strip().lower()
+            if not text_lower:
+                return True
+            if 'rp' in text_lower or 'idr' in text_lower:
+                return True
+            if re.fullmatch(r"[0-9.,\s]+", text_lower):
+                return True
+        except:
+            pass
+        return False
+
+    def _collect_ticket_categories(self):
+        """Ambil daftar kategori tiket yang tersedia dari widget"""
+        categories = []
+        seen = set()
+
+        def add_candidate(name):
+            if not name:
+                return
+            cleaned = re.sub(r"\s+", " ", str(name)).strip()
+            if not cleaned:
+                return
+            if self._looks_like_price(cleaned):
+                return
+            key = cleaned.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            categories.append(cleaned)
+
+        try:
+            heading_elements = self.driver.find_elements(
+                By.XPATH,
+                "//div[contains(@class, 'ticket-item')]//h4 | "
+                "//div[contains(@class, 'ticket-item')]//h5 | "
+                "//div[contains(@class, 'ticket-item')]//h6",
+            )
+            for heading in heading_elements:
+                add_candidate(heading.text)
+        except:
+            pass
+
+        try:
+            data_name_elements = self.driver.find_elements(By.XPATH, "//*[@data-ticket-name]")
+            for elem in data_name_elements:
+                add_candidate(elem.get_attribute('data-ticket-name'))
+        except:
+            pass
+
+        try:
+            ticket_name_elements = self.driver.find_elements(By.XPATH, "//*[@ticket-name]")
+            for elem in ticket_name_elements:
+                add_candidate(elem.get_attribute('ticket-name'))
+        except:
+            pass
+
+        return categories
+    
+    def _dispatch_input_change(self, element):
+        """Trigger input/change event setelah value diubah"""
+        try:
+            self.driver.execute_script(
+                "arguments[0].dispatchEvent(new Event('input', { bubbles: true }));",
+                element,
+            )
+            self.driver.execute_script(
+                "arguments[0].dispatchEvent(new Event('change', { bubbles: true }));",
+                element,
+            )
+        except:
+            pass
+    
+    def _set_quantity_from_select(self, select_elem, quantity):
+        """Set quantity dari elemen <select>"""
+        try:
+            if select_elem.get_attribute('disabled') is not None:
+                return False
+            if (select_elem.get_attribute('aria-disabled') or '').lower() == 'true':
+                return False
+        except:
+            pass
+        
+        try:
+            select = Select(select_elem)
+        except:
+            return False
+        
+        target_str = str(quantity)
+        
+        try:
+            current_value = select_elem.get_attribute('value') or ''
+            if self._extract_first_int(current_value) == quantity:
+                return True
+        except:
+            pass
+        
+        for opt in select.options:
+            value = (opt.get_attribute('value') or '').strip()
+            text = (opt.text or '').strip()
+            if value == target_str:
+                select.select_by_value(value)
+                self._dispatch_input_change(select_elem)
+                return True
+            if text == target_str:
+                select.select_by_visible_text(text)
+                self._dispatch_input_change(select_elem)
+                return True
+        
+        for idx, opt in enumerate(select.options):
+            value = (opt.get_attribute('value') or '').strip()
+            text = (opt.text or '').strip()
+            num = self._extract_first_int(value) or self._extract_first_int(text)
+            if num == quantity:
+                try:
+                    select.select_by_index(idx)
+                except:
+                    try:
+                        opt.click()
+                    except:
+                        return False
+                self._dispatch_input_change(select_elem)
+                return True
+        
+        return False
+    
+    def _click_agree_popup(self, timeout_seconds=6):
+        """Klik tombol Agree pada popup (jika muncul)"""
+        end_time = time.time() + timeout_seconds
+        
+        while time.time() < end_time:
+            try:
+                agree_btn = self.driver.find_element(By.ID, "btn-agree-tnc")
+                if agree_btn and agree_btn.is_displayed():
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
+                        agree_btn,
+                    )
+                    self.random_delay(0.2, 0.4)
+                    try:
+                        agree_btn.click()
+                    except:
+                        self.driver.execute_script("arguments[0].click();", agree_btn)
+                    print("   ✅ Popup T&C terdeteksi, klik 'Agree'")
+                    self.random_delay(0.5, 1)
+                    return True
+            except:
+                pass
+            
+            try:
+                agree_buttons = self.driver.find_elements(
+                    By.XPATH,
+                    "//button[contains(., 'Agree') or contains(., 'Setuju') or contains(., 'I Agree')]",
+                )
+                for btn in agree_buttons:
+                    try:
+                        if not btn.is_displayed():
+                            continue
+                    except:
+                        pass
+                    
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
+                        btn,
+                    )
+                    self.random_delay(0.2, 0.4)
+                    try:
+                        btn.click()
+                    except:
+                        self.driver.execute_script("arguments[0].click();", btn)
+                    print("   ✅ Popup terdeteksi, klik tombol Agree")
+                    self.random_delay(0.5, 1)
+                    return True
+            except:
+                pass
+            
+            self.random_delay(0.2, 0.5)
+        
+        return False
+    
     def find_and_select_ticket_category(self, category_name, quantity):
         """Cari dan pilih kategori tiket di widget Loket"""
         try:
@@ -801,7 +1017,7 @@ class SimpleButtonBot:
                         try:
                             # Cari ancestor yang berisi input quantity dan button order
                             section = heading.find_element(By.XPATH, 
-                                "./ancestor::*[.//input[@type='number'] or .//button[contains(text(), 'Order')]][1]")
+                                "./ancestor::*[.//input[@type='number'] or .//select or .//button[contains(text(), 'Order')]][1]")
                             target_section = section
                             break
                         except:
@@ -824,7 +1040,7 @@ class SimpleButtonBot:
                             # Cari section yang berisi elemen ini dan memiliki input quantity
                             try:
                                 section = elem.find_element(By.XPATH, 
-                                    "./ancestor::*[.//input[@type='number'] or .//button[contains(text(), 'Order')]][1]")
+                                    "./ancestor::*[.//input[@type='number'] or .//select or .//button[contains(text(), 'Order')]][1]")
                                 target_section = section
                                 break
                             except:
@@ -863,20 +1079,49 @@ class SimpleButtonBot:
                 if quantity_inputs:
                     for qty_input in quantity_inputs:
                         try:
+                            current_value = qty_input.get_attribute('value') or ''
+                            if self._extract_first_int(current_value) == quantity:
+                                print(f"   ✅ Jumlah tiket sudah {quantity}")
+                                quantity_set = True
+                                self.random_delay(0.3, 0.6)
+                                break
+                            
                             # Set quantity dengan JavaScript
                             self.driver.execute_script(f"arguments[0].value = {quantity};", qty_input)
-                            self.driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", qty_input)
-                            self.driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", qty_input)
+                            self._dispatch_input_change(qty_input)
                             
                             # Verifikasi value sudah ter-set
                             value = qty_input.get_attribute('value')
-                            if str(quantity) in str(value):
+                            if self._extract_first_int(value) == quantity:
                                 print(f"   ✅ Jumlah tiket di-set ke {quantity}")
                                 quantity_set = True
                                 self.random_delay(0.5, 1)
                                 break
                         except:
                             continue
+                
+                # Jika tidak ada input number, coba dropdown <select>
+                if not quantity_set:
+                    try:
+                        select_elements = target_section.find_elements(
+                            By.XPATH,
+                            ".//select[contains(@class, 'ticket-types') or contains(@name, 'ticket[') or contains(@id, 'ticket_')] | .//select",
+                        )
+                        if select_elements:
+                            for select_elem in select_elements:
+                                try:
+                                    if not select_elem.is_displayed():
+                                        continue
+                                except:
+                                    pass
+                                
+                                if self._set_quantity_from_select(select_elem, quantity):
+                                    print(f"   ✅ Jumlah tiket di-set ke {quantity} (via dropdown)")
+                                    quantity_set = True
+                                    self.random_delay(0.5, 1)
+                                    break
+                    except:
+                        pass
                 
                 # Jika tidak ada input, coba klik button +/- untuk set quantity
                 if not quantity_set:
@@ -899,14 +1144,14 @@ class SimpleButtonBot:
             try:
                 # Cari tombol Order Now di section atau di seluruh halaman
                 order_buttons = target_section.find_elements(By.XPATH, 
-                    ".//button[contains(text(), 'Order') or contains(text(), 'Pesan')] | " +
-                    ".//a[contains(text(), 'Order') or contains(text(), 'Pesan')]")
+                    ".//button[contains(., 'Order') or contains(., 'Pesan')] | " +
+                    ".//a[contains(., 'Order') or contains(., 'Pesan')]")
                 
                 # Jika tidak ada di section, cari di seluruh halaman
                 if not order_buttons:
                     order_buttons = self.driver.find_elements(By.XPATH, 
-                        "//button[contains(text(), 'Order Now')] | //button[contains(text(), 'Order')] | " +
-                        "//a[contains(text(), 'Order Now')]")
+                        "//button[contains(., 'Order Now')] | //button[contains(., 'Order')] | " +
+                        "//a[contains(., 'Order Now')]")
                 
                 if order_buttons:
                     order_btn = order_buttons[0]
@@ -936,6 +1181,9 @@ class SimpleButtonBot:
                     if clicked:
                         self.random_delay(2, 4)
                         print(f"   ✅ Tombol Order Now diklik!")
+                        
+                        # Jika muncul popup T&C, langsung klik Agree
+                        self._click_agree_popup(timeout_seconds=8)
                         
                         # Cek apakah berhasil (halaman checkout/personal information muncul)
                         self.random_delay(1, 2)
@@ -1044,4 +1292,3 @@ if __name__ == "__main__":
         print(f"\n❌ Error: {e}")
         import traceback
         traceback.print_exc()
-
