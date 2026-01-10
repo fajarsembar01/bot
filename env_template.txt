@@ -1,0 +1,13 @@
+# Copy file ini menjadi .env dan sesuaikan nilainya
+# URL konser yang ingin dibeli tiketnya
+CONCERT_URL=https://ateezinjakarta.com/
+
+# Mode headless (True/False) - True berarti browser tidak terlihat
+HEADLESS=False
+
+# Waktu tunggu sebelum refresh ulang halaman (dalam detik)
+WAIT_TIME=5
+
+# Waktu untuk mulai monitoring (format: HH:MM)
+START_MONITORING_TIME=09:00
+
