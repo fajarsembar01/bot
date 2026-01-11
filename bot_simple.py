@@ -1,6 +1,6 @@
 """
 Bot Sederhana untuk Mencari Tombol di Halaman Konser Loket.com
-Refresh setiap 2-5 detik (random) dan cari tombol berdasarkan text
+Refresh setiap 0.5-4 detik (random) dan cari tombol berdasarkan text
 Auto beli tiket setelah masuk widget Loket
 """
 import time
@@ -24,17 +24,24 @@ class SimpleButtonBot:
         self.auto_buy = auto_buy
         self.ticket_category = ticket_category
         self.ticket_quantity = ticket_quantity
+        self.loop_delay_min = 0.5
+        self.loop_delay_max = 4
+        self.auto_buy_prompted = False
         self.driver = None
     
-    def random_delay(self, min_seconds=2, max_seconds=5):
+    def random_delay(self, min_seconds=0.5, max_seconds=4):
         """Random delay antara min dan max seconds"""
+        if min_seconds < 0:
+            min_seconds = 0
+        if max_seconds < min_seconds:
+            max_seconds = min_seconds
         delay = random.uniform(min_seconds, max_seconds)
         time.sleep(delay)
         return round(delay, 1)
         
     def setup_driver(self):
         """Setup Chrome WebDriver"""
-        print("🔧 Setting up browser...")
+        print("🔧 Browser...")
         chrome_options = Options()
         
         # Anti-detection options
@@ -61,7 +68,7 @@ class SimpleButtonBot:
                 '''
             })
             
-            print("✅ Browser setup berhasil!")
+            print("✅ Browser siap")
             return True
         except Exception as e:
             print(f"❌ Error setting up browser: {e}")
@@ -200,7 +207,7 @@ class SimpleButtonBot:
             try:
                 self.driver.execute_script("arguments[0].click();", button)
                 # Tunggu lebih lama untuk melihat perubahan (kadang redirect butuh waktu)
-                self.random_delay(2, 5)
+                self.random_delay(0.6, 1.6)
                 
                 # Cek apakah ada perubahan dengan verifikasi yang lebih ketat
                 if self._check_click_success_strict(url_before, title_before):
@@ -211,7 +218,7 @@ class SimpleButtonBot:
             # Method 2: Normal click
             try:
                 button.click()
-                self.random_delay(2, 5)
+                self.random_delay(0.6, 1.6)
                 
                 if self._check_click_success_strict(url_before, title_before):
                     return True
@@ -222,7 +229,7 @@ class SimpleButtonBot:
             try:
                 from selenium.webdriver.common.action_chains import ActionChains
                 ActionChains(self.driver).move_to_element(button).click().perform()
-                self.random_delay(2, 5)
+                self.random_delay(0.6, 1.6)
                 
                 if self._check_click_success_strict(url_before, title_before):
                     return True
@@ -244,7 +251,7 @@ class SimpleButtonBot:
                         element.dispatchEvent(event);
                     });
                 """, button)
-                self.random_delay(2, 5)
+                self.random_delay(0.6, 1.6)
                 
                 if self._check_click_success_strict(url_before, title_before):
                     return True
@@ -261,7 +268,7 @@ class SimpleButtonBot:
         """Cek apakah klik berhasil dengan verifikasi yang lebih ketat"""
         try:
             # Tunggu sebentar untuk memastikan perubahan sudah terjadi
-            self.random_delay(1, 2)
+            self.random_delay(0.4, 0.9)
             
             url_after = self.driver.current_url
             title_after = self.driver.title
@@ -270,12 +277,10 @@ class SimpleButtonBot:
             if url_after != url_before and url_after.strip() != url_before.strip():
                 # URL berubah, pastikan bukan hanya karena hash/fragment
                 if url_after.split('#')[0] != url_before.split('#')[0]:
-                    print(f"✅ URL berubah: {url_before} → {url_after}")
                     return True
             
             # PRIORITAS 2: Cek apakah title berubah (indikasi navigasi)
             if title_after != title_before and title_after.strip():
-                print(f"✅ Title berubah: {title_before} → {title_after}")
                 return True
             
             # PRIORITAS 3: Cek indikator spesifik di halaman (widget loket, checkout, dll)
@@ -294,7 +299,6 @@ class SimpleButtonBot:
                 
                 for indicator in strong_indicators:
                     if indicator in page_source:
-                        print(f"✅ Indikator kuat ditemukan: '{indicator}'")
                         return True
                 
                 # Cek apakah ada iframe baru yang muncul (widget loket biasanya dalam iframe)
@@ -304,7 +308,6 @@ class SimpleButtonBot:
                         for iframe in iframes:
                             src = iframe.get_attribute('src') or ''
                             if 'loket.com' in src.lower() or 'widget' in src.lower():
-                                print(f"✅ Iframe widget ditemukan: {src[:100]}")
                                 return True
                 except:
                     pass
@@ -318,7 +321,6 @@ class SimpleButtonBot:
                         for modal in modals[:3]:  # Cek 3 modal pertama saja
                             modal_html = modal.get_attribute('innerHTML') or ''
                             if any(indicator in modal_html.lower() for indicator in ['loket', 'widget', 'ticket', 'order']):
-                                print(f"✅ Modal/Widget terdeteksi")
                                 return True
                 except:
                     pass
@@ -335,56 +337,24 @@ class SimpleButtonBot:
     
     def notify_found(self, status):
         """Notifikasi ketika tombol ditemukan"""
-        print("\n" + "="*60)
-        status_messages = {
-            'enabled': "✅ TOMBOL DITEMUKAN (Status: ENABLED)",
-            'disabled': "⚠️ TOMBOL DITEMUKAN (Status: DISABLED)",
-            'hidden': "🔍 TOMBOL DITEMUKAN (Status: HIDDEN)",
-            'out_of_view': "📍 TOMBOL DITEMUKAN (Status: OUT OF VIEW)",
-            'unknown': "❓ TOMBOL DITEMUKAN (Status: UNKNOWN)"
-        }
-        
-        message = status_messages.get(status, f"ℹ️ TOMBOL DITEMUKAN (Status: {status})")
-        print(message)
-        print("="*60)
-        print(f"📍 URL: {self.driver.current_url}")
-        print(f"🔘 Text tombol: '{self.button_text}'")
-        print(f"📊 Status: {status}")
-        print("\n💡 Bot akan MENCUBA KLIK apapun statusnya...")
-        print("   Jika klik berhasil (halaman berubah), bot akan berhenti.")
-        print("="*60 + "\n")
-        
-        # Beep sound untuk notifikasi (1x saja, nanti ada lagi kalau berhasil)
-        try:
-            import os
-            os.system('afplay /System/Library/Sounds/Glass.aiff 2>/dev/null || echo "\\a"')
-        except:
-            pass
+        print(f"\n🔘 Tombol ditemukan ({status}), mencoba klik...")
         
     def run(self):
         """Jalankan bot"""
-        print("="*60)
-        print("🤖 BOT PENCARI TOMBOL LOKET.COM")
-        print("="*60)
-        print(f"📍 Link Konser: {self.concert_url}")
-        print(f"🔘 Text Tombol: '{self.button_text}'")
-        print(f"🕐 Waktu mulai: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("="*60 + "\n")
+        print(f"▶️ Start {datetime.now().strftime('%H:%M:%S')}")
+        print(f"URL: {self.concert_url}")
+        print(f"Target: {self.button_text}")
         
         if not self.setup_driver():
             return
         
         try:
-            print(f"🌐 Membuka halaman: {self.concert_url}")
+            print("🌐 Open page...")
             self.driver.get(self.concert_url)
-            self.random_delay(2, 3)
+            self.random_delay(0.6, 1.5)
             
             refresh_count = 0
             last_status = None
-            
-            print(f"\n🔄 Bot akan refresh setiap 3 detik dan mencari tombol '{self.button_text}'...")
-            print("🔄 Bot akan terus loop sampai URL benar-benar berubah!")
-            print("⚠️ Tekan Ctrl+C untuk stop\n")
             
             # Simpan URL awal untuk referensi
             initial_url = self.driver.current_url
@@ -402,44 +372,24 @@ class SimpleButtonBot:
                     if url_before_check != initial_url_base:
                         # URL sudah berubah! Cek apakah ini perubahan yang valid
                         if self._verify_page_change(initial_url, current_url):
-                            print("\n" + "="*60)
-                            print("🎉 URL SUDAH BERUBAH!")
-                            print("="*60)
-                            print(f"📍 URL awal: {initial_url}")
-                            print(f"📍 URL sekarang: {current_url}")
-                            print("\n✅ Bot akan berhenti. Silakan lanjutkan pembelian manual.")
-                            print("="*60 + "\n")
-                            
-                            # Notifikasi suara
-                            try:
-                                import os
-                                for _ in range(5):
-                                    os.system('afplay /System/Library/Sounds/Glass.aiff 2>/dev/null || echo "\\a"')
-                                    time.sleep(0.2)
-                            except:
-                                pass
+                            print(f"\n✅ URL berubah: {current_url}")
                             
                             # Cek apakah ini widget Loket, jika ya tanya apakah mau auto beli
                             if 'widget.loket.com' in current_url or 'loket.com/widget' in current_url:
-                                self.handle_widget_loket_auto_buy()
+                                if self._should_prompt_auto_buy(current_url):
+                                    self.handle_widget_loket_auto_buy()
                             
                             self.monitor_after_click()
                             break
                     
-                    print(f"[{current_time}] Refresh #{refresh_count} - Mencari tombol... (URL: {url_before_check[:50]}...)", end='\r')
+                    print(f"[{current_time}] #{refresh_count} mencari...", end='\r')
                     
                     # Cari SEMUA tombol dengan text yang sama
                     buttons = self.find_buttons_by_text()
                     
                     if buttons and len(buttons) > 0:
-                        if len(buttons) > 1:
-                            print(f"\n✅ Ditemukan {len(buttons)} tombol dengan text '{self.button_text}'")
-                        else:
-                            print(f"\n✅ Ditemukan tombol dengan text '{self.button_text}'")
-                        
-                        print("   🔄 Bot akan terus loop sampai URL benar-benar berubah!")
-                        
-                        url_before_click = self.driver.current_url
+                        count = len(buttons)
+                        print(f"\n✅ Ditemukan {count} tombol")
                         success = False
                         
                         # COBA SEMUA TOMBOL sampai salah satunya benar-benar berhasil
@@ -449,49 +399,31 @@ class SimpleButtonBot:
                                 
                                 # Hanya print status jika ini tombol pertama atau status berubah
                                 if idx == 1 and (status != last_status or last_status is None):
-                                    print()  # New line
                                     self.notify_found(status)
                                     last_status = status
                                 
-                                if len(buttons) > 1:
-                                    print(f"🖱️ Mencoba tombol #{idx}/{len(buttons)} (Status: {status})...")
+                                if count > 1:
+                                    print(f"🖱️ Klik {idx}/{count}...")
                                 else:
-                                    print(f"🖱️ Mencoba mengklik tombol (Status: {status})...")
+                                    print("🖱️ Klik...")
                                 
                                 # Coba klik tombol ini
                                 url_before_button_click = self.driver.current_url
                                 
                                 if self.click_button(button):
                                     # Verifikasi ulang setelah beberapa detik untuk memastikan
-                                    print("⏳ Verifikasi perubahan halaman...")
-                                    self.random_delay(2, 5)
+                                    self.random_delay(0.5, 1.2)
                                     
                                     url_after_click = self.driver.current_url
                                     final_check = self._verify_page_change(url_before_button_click, url_after_click)
                                     
                                     if final_check:
-                                        print("\n" + "="*60)
-                                        print("🎉 BERHASIL! Tombol berhasil diklik dan halaman benar-benar berubah!")
-                                        print("="*60)
-                                        print(f"📍 URL sebelum: {url_before_button_click}")
-                                        print(f"📍 URL sesudah: {url_after_click}")
-                                        print(f"🔘 Tombol yang berhasil: #{idx}/{len(buttons)}")
-                                        print(f"📊 Status tombol: {status}")
-                                        print("\n✅ Bot akan berhenti. Silakan lanjutkan pembelian manual.")
-                                        print("="*60 + "\n")
-                                        
-                                        # Notifikasi suara
-                                        try:
-                                            import os
-                                            for _ in range(5):
-                                                os.system('afplay /System/Library/Sounds/Glass.aiff 2>/dev/null || echo "\\a"')
-                                                time.sleep(0.2)
-                                        except:
-                                            pass
+                                        print(f"\n✅ Klik berhasil: {url_after_click}")
                                         
                                         # Cek apakah ini widget Loket, jika ya tanya apakah mau auto beli
                                         if 'widget.loket.com' in url_after_click or 'loket.com/widget' in url_after_click:
-                                            self.handle_widget_loket_auto_buy()
+                                            if self._should_prompt_auto_buy(url_after_click):
+                                                self.handle_widget_loket_auto_buy()
                                         
                                         # Monitor sebentar untuk memastikan
                                         self.monitor_after_click()
@@ -499,78 +431,39 @@ class SimpleButtonBot:
                                         break
                                     else:
                                         # Verifikasi gagal - URL masih sama, lanjutkan loop
-                                        if len(buttons) > 1:
-                                            print(f"   ❌ Tombol #{idx} tidak mengubah halaman (URL masih sama)")
-                                            print(f"   URL: {url_after_click}")
-                                            print(f"   Mencoba tombol berikutnya atau refresh...")
-                                        else:
-                                            print(f"   ❌ Verifikasi gagal: Halaman tidak benar-benar berubah")
-                                            print(f"   URL masih sama: {url_after_click}")
-                                            print(f"   Bot akan refresh dan coba lagi...")
+                                        pass
                                 else:
-                                    # Klik tidak berhasil, coba tombol berikutnya
-                                    if len(buttons) > 1:
-                                        print(f"   ❌ Tombol #{idx} tidak bisa diklik, mencoba tombol berikutnya...")
+                                    pass
                                     
                             except Exception as e:
-                                if len(buttons) > 1:
-                                    print(f"   ⚠️ Error pada tombol #{idx}: {e}")
+                                if count > 1:
+                                    print(f"⚠️ Error tombol #{idx}: {e}")
                                 continue
                         
                         # Jika semua tombol sudah dicoba dan tidak ada yang berhasil, tetap loop
                         if not success:
-                            if len(buttons) > 1:
-                                print(f"\n⚠️ Semua {len(buttons)} tombol sudah dicoba, tapi URL masih sama")
-                            else:
-                                try:
-                                    status_icon = "🟢" if status == 'enabled' else "🔴" if status == 'disabled' else "🟡" if status == 'hidden' else "⚪"
-                                    print(f"\n⚠️ Klik belum berhasil ({status_icon} {status})")
-                                except:
-                                    print(f"\n⚠️ Klik belum berhasil")
-                            
-                            print(f"   🔄 URL masih: {self.driver.current_url}")
-                            print(f"   🔄 Bot akan refresh dan loop lagi sampai URL benar-benar berubah...")
+                            print("\n⏳ Belum berhasil, refresh...")
                     else:
                         # Tombol tidak ditemukan
                         if last_status is not None:
-                            print()  # New line jika sebelumnya ada status
-                            print(f"⚠️ Tombol '{self.button_text}' tidak ditemukan")
                             last_status = None
-                        print(f"   🔄 URL sekarang: {current_url}")
-                        print(f"   🔄 Bot akan refresh dan cari lagi...")
                     
-                    # Refresh halaman setiap 2-5 detik random (TETAP LOOP sampai URL berubah)
-                    delay = self.random_delay(2, 5)
-                    print(f"\n⏳ Menunggu {delay:.1f} detik sebelum refresh...")
-                    print(f"🔄 Refresh halaman...")
+                    # Refresh halaman setiap 0.5-4 detik random (TETAP LOOP sampai URL berubah)
+                    self.random_delay(self.loop_delay_min, self.loop_delay_max)
                     self.driver.refresh()
-                    self.random_delay(1, 2)  # Tunggu halaman selesai load setelah refresh
+                    self.random_delay(0.4, 1.0)  # Tunggu halaman selesai load setelah refresh
                     
                     # Update initial_url jika halaman baru dibuka
                     new_url = self.driver.current_url
                     if new_url != initial_url:
                         # Cek apakah ini perubahan yang valid
                         if self._verify_page_change(initial_url, new_url):
-                            print("\n" + "="*60)
-                            print("🎉 URL BERUBAH SETELAH REFRESH!")
-                            print("="*60)
-                            print(f"📍 URL awal: {initial_url}")
-                            print(f"📍 URL sekarang: {new_url}")
-                            print("\n✅ Bot akan berhenti. Silakan lanjutkan pembelian manual.")
-                            print("="*60 + "\n")
-                            
-                            # Notifikasi suara
-                            try:
-                                import os
-                                for _ in range(5):
-                                    os.system('afplay /System/Library/Sounds/Glass.aiff 2>/dev/null || echo "\\a"')
-                                    time.sleep(0.2)
-                            except:
-                                pass
+                            print(f"\n✅ URL berubah: {new_url}")
                             
                             # Cek apakah ini widget Loket, jika ya tanya apakah mau auto beli
                             if 'widget.loket.com' in new_url or 'loket.com/widget' in new_url:
-                                self.handle_widget_loket_auto_buy()
+                                if self._should_prompt_auto_buy(new_url):
+                                    self.handle_widget_loket_auto_buy()
                             
                             self.monitor_after_click()
                             break
@@ -579,31 +472,29 @@ class SimpleButtonBot:
                             initial_url = new_url
                     
                 except KeyboardInterrupt:
-                    print("\n\n⚠️ Bot dihentikan oleh user")
+                    print("\n\n⚠️ Dihentikan")
                     break
                 except WebDriverException as e:
                     print(f"\n⚠️ WebDriver error: {e}")
-                    print("🔄 Mencoba reconnect...")
-                    self.random_delay(2, 3)
+                    self.random_delay(0.6, 1.2)
                     try:
                         self.driver.get(self.concert_url)
-                        self.random_delay(2, 3)
+                        self.random_delay(0.6, 1.2)
                     except:
-                        print("❌ Gagal reconnect, coba restart bot")
+                        print("❌ Reconnect gagal")
                         break
                 except Exception as e:
                     print(f"\n⚠️ Error: {e}")
-                    self.random_delay(2, 3)
+                    self.random_delay(0.6, 1.2)
             
         except KeyboardInterrupt:
-            print("\n\n⚠️ Bot dihentikan oleh user")
+            print("\n\n⚠️ Dihentikan")
         except Exception as e:
             print(f"\n❌ Error: {e}")
             import traceback
             traceback.print_exc()
         finally:
-            print("\n" + "="*60)
-            print("⚠️ Tutup browser? (y/n): ", end="")
+            print("\nTutup browser? (y/n): ", end="")
             try:
                 response = input().strip().lower()
                 if response == 'y':
@@ -611,7 +502,7 @@ class SimpleButtonBot:
                         self.driver.quit()
                         print("✅ Browser ditutup")
                 else:
-                    print("✅ Browser tetap terbuka. Silakan gunakan manual.")
+                    print("✅ Browser tetap terbuka")
             except:
                 if self.driver:
                     self.driver.quit()
@@ -625,7 +516,6 @@ class SimpleButtonBot:
             
             # Jika URL benar-benar berbeda, pasti berhasil
             if url_before_base != url_after_base:
-                print(f"   ✅ URL berubah: {url_before_base} → {url_after_base}")
                 return True
             
             # Jika URL sama, HARUS ada indikator kuat di halaman
@@ -641,7 +531,6 @@ class SimpleButtonBot:
                 
                 for indicator in very_strong_indicators:
                     if indicator in page_source:
-                        print(f"   ✅ Indikator kuat ditemukan: '{indicator}'")
                         return True
                 
                 # Cek iframe dengan src widget loket (lebih reliable)
@@ -650,7 +539,6 @@ class SimpleButtonBot:
                     for iframe in iframes:
                         src = (iframe.get_attribute('src') or '').lower()
                         if 'widget.loket.com' in src or ('loket.com' in src and 'widget' in src):
-                            print(f"   ✅ Iframe widget Loket ditemukan: {src[:80]}...")
                             return True
                 except:
                     pass
@@ -664,13 +552,11 @@ class SimpleButtonBot:
                         for elem in widget_elements[:3]:
                             elem_html = (elem.get_attribute('innerHTML') or '').lower()
                             if 'widget.loket.com' in elem_html or 'loket.com/widget' in elem_html:
-                                print(f"   ✅ Elemen widget Loket ditemukan")
                                 return True
                 except:
                     pass
                 
                 # Jika tidak ada indikator kuat, TIDAK BERHASIL
-                print(f"   ❌ URL sama dan tidak ada indikator kuat widget Loket")
                 return False
                 
             except Exception as e:
@@ -683,27 +569,27 @@ class SimpleButtonBot:
     
     def handle_widget_loket_auto_buy(self):
         """Handle auto beli tiket setelah widget Loket terbuka"""
-        print("\n" + "="*60)
-        print("🎫 WIDGET LOKET TERBUKA!")
-        print("="*60)
-        print(f"📍 URL: {self.driver.current_url}")
-        print("\n💡 Bot dapat membantu auto beli tiket!")
-        print("="*60)
+        current_url = self.driver.current_url
+        if not self._should_prompt_auto_buy(current_url):
+            return
+        
+        self.auto_buy_prompted = True
+        print(f"\n🎫 Widget terbuka: {current_url}")
         
         # Tanya apakah mau auto beli
-        auto_buy = input("\n🤖 Ingin bot auto beli tiket? (y/n): ").strip().lower()
+        auto_buy = input("Auto buy? (y/n): ").strip().lower()
         
         if auto_buy == 'y':
             # Pilih kategori tiket dengan nomor
-            self.random_delay(1, 2)
+            self.random_delay(0.4, 0.9)
             ticket_categories = self._collect_ticket_categories()
             
             if ticket_categories:
-                print("\n📋 Daftar kategori tiket (pilih nomor):")
+                print("\nDaftar kategori (pilih nomor):")
                 for idx, name in enumerate(ticket_categories, 1):
                     print(f"   {idx}. {name}")
                 
-                choice = input("\n🎫 Masukkan nomor kategori tiket: ").strip()
+                choice = input("Nomor kategori: ").strip()
                 if not choice.isdigit():
                     print("❌ Input harus angka sesuai daftar!")
                     return
@@ -717,22 +603,14 @@ class SimpleButtonBot:
                 print(f"✅ Dipilih: {ticket_category}")
             else:
                 # Fallback manual jika daftar tidak terbaca
-                print("\n📋 Kategori tiket yang tersedia (contoh):")
-                print("   - FANTASY VIP A PACKAGE")
-                print("   - FANTASY VIP B PACKAGE")
-                print("   - ORANGE A")
-                print("   - ORANGE B")
-                print("   - YELLOW")
-                print("   - PINK B")
-                
-                ticket_category = input("\n🎫 Masukkan nama kategori tiket yang ingin dibeli: ").strip()
+                ticket_category = input("Nama kategori: ").strip()
                 if not ticket_category:
                     print("❌ Kategori tiket tidak boleh kosong!")
                     return
             
             # Input jumlah tiket
             try:
-                ticket_quantity = int(input("🔢 Masukkan jumlah tiket (1-6): ").strip())
+                ticket_quantity = int(input("Jumlah tiket (1-6): ").strip())
                 if ticket_quantity < 1 or ticket_quantity > 6:
                     print("⚠️ Jumlah tiket harus antara 1-6, menggunakan 1")
                     ticket_quantity = 1
@@ -740,24 +618,16 @@ class SimpleButtonBot:
                 print("⚠️ Input tidak valid, menggunakan 1 tiket")
                 ticket_quantity = 1
             
-            print(f"\n✅ Konfigurasi auto beli:")
-            print(f"   Kategori: {ticket_category}")
-            print(f"   Jumlah: {ticket_quantity}")
-            print("\n🚀 Memulai auto beli tiket...")
+            print(f"\n✅ {ticket_category} x{ticket_quantity}")
             
             # Mulai auto beli
             self.auto_buy_ticket(ticket_category, ticket_quantity)
         else:
-            print("\n✅ Bot akan berhenti. Silakan beli tiket manual.")
+            print("\n✅ Manual")
     
     def auto_buy_ticket(self, category_name, quantity):
         """Auto beli tiket di widget Loket"""
-        print("\n" + "="*60)
-        print("🔄 AUTO BELI TIKET")
-        print("="*60)
-        print(f"📋 Kategori: {category_name}")
-        print(f"🔢 Jumlah: {quantity}")
-        print("="*60 + "\n")
+        print(f"\n🔄 Auto-buy: {category_name} x{quantity}")
         
         attempt = 0
         max_attempts = 1000  # Loop sampai berhasil
@@ -766,46 +636,30 @@ class SimpleButtonBot:
             attempt += 1
             current_time = datetime.now().strftime('%H:%M:%S')
             
-            print(f"[{current_time}] Percobaan #{attempt} - Refresh dan cari kategori '{category_name}'...")
+            print(f"[{current_time}] Attempt #{attempt}", end='\r')
             
             try:
                 # Refresh halaman
                 self.driver.refresh()
-                delay = self.random_delay(2, 5)
-                print(f"   ⏳ Menunggu {delay:.1f} detik setelah refresh...")
+                self.random_delay(self.loop_delay_min, self.loop_delay_max)
                 
                 # Cari kategori tiket
                 category_found = self.find_and_select_ticket_category(category_name, quantity)
                 
                 if category_found:
-                    print("\n" + "="*60)
-                    print("🎉 BERHASIL! Kategori tiket ditemukan dan dipilih!")
-                    print("="*60)
-                    print(f"📋 Kategori: {category_name}")
-                    print(f"🔢 Jumlah: {quantity}")
-                    print("\n✅ Bot akan berhenti. Silakan lanjutkan pembayaran manual.")
-                    print("="*60 + "\n")
-                    
-                    # Notifikasi suara
-                    try:
-                        import os
-                        for _ in range(5):
-                            os.system('afplay /System/Library/Sounds/Glass.aiff 2>/dev/null || echo "\\a"')
-                            self.random_delay(0.1, 0.3)
-                    except:
-                        pass
-                    
-                    break
+                    print(f"\n✅ Siap: {category_name} x{quantity}")
+                    return True
                 else:
-                    print(f"   ⚠️ Kategori '{category_name}' belum tersedia atau belum bisa dipilih")
-                    print(f"   🔄 Refresh dan coba lagi...")
+                    pass
                     
             except KeyboardInterrupt:
-                print("\n\n⚠️ Auto beli dihentikan oleh user")
-                break
+                print("\n\n⚠️ Dihentikan")
+                return False
             except Exception as e:
-                print(f"   ⚠️ Error: {e}")
-                self.random_delay(2, 3)
+                print(f"\n⚠️ Error: {e}")
+                self.random_delay(0.6, 1.2)
+        
+        return False
     
     def _extract_first_int(self, text):
         """Ambil angka pertama dari string"""
@@ -891,6 +745,15 @@ class SimpleButtonBot:
             )
         except:
             pass
+
+    def _should_prompt_auto_buy(self, current_url):
+        """Cek apakah perlu prompt auto-buy lagi"""
+        if self.auto_buy_prompted:
+            return False
+        url = (current_url or "").lower()
+        if any(step in url for step in ['register', 'checkout', 'confirmation', 'payment', 'personal']):
+            return False
+        return True
     
     def _set_quantity_from_select(self, select_elem, quantity):
         """Set quantity dari elemen <select>"""
@@ -962,8 +825,8 @@ class SimpleButtonBot:
                         agree_btn.click()
                     except:
                         self.driver.execute_script("arguments[0].click();", agree_btn)
-                    print("   ✅ Popup T&C terdeteksi, klik 'Agree'")
-                    self.random_delay(0.5, 1)
+                    print("✅ Agree")
+                    self.random_delay(0.2, 0.6)
                     return True
             except:
                 pass
@@ -989,8 +852,8 @@ class SimpleButtonBot:
                         btn.click()
                     except:
                         self.driver.execute_script("arguments[0].click();", btn)
-                    print("   ✅ Popup terdeteksi, klik tombol Agree")
-                    self.random_delay(0.5, 1)
+                    print("✅ Agree")
+                    self.random_delay(0.2, 0.6)
                     return True
             except:
                 pass
@@ -1006,26 +869,50 @@ class SimpleButtonBot:
             
             # Cari kategori dengan berbagai metode
             target_section = None
-            
-            # Method 1: Cari heading (h4, h5, h6) yang mengandung nama kategori
+
+            # Method 0: Cari di blok ticket-item langsung
             try:
-                headings = self.driver.find_elements(By.XPATH, "//h4 | //h5 | //h6")
-                for heading in headings:
-                    text = heading.text.strip().upper()
-                    if category_upper in text:
-                        # Cari parent section yang berisi kategori ini
-                        try:
-                            # Cari ancestor yang berisi input quantity dan button order
-                            section = heading.find_element(By.XPATH, 
-                                "./ancestor::*[.//input[@type='number'] or .//select or .//button[contains(text(), 'Order')]][1]")
-                            target_section = section
+                ticket_items = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'ticket-item')]")
+                for item in ticket_items:
+                    try:
+                        item_text = (item.text or '').strip().upper()
+                        if category_upper in item_text:
+                            target_section = item
                             break
-                        except:
-                            # Jika tidak ada, gunakan heading sebagai starting point
-                            target_section = heading
+                        
+                        name_elems = item.find_elements(By.XPATH, ".//*[@data-ticket-name or @ticket-name]")
+                        for elem in name_elems:
+                            name_attr = (elem.get_attribute('data-ticket-name') or elem.get_attribute('ticket-name') or '')
+                            if category_upper in name_attr.upper():
+                                target_section = item
+                                break
+                        if target_section:
                             break
+                    except:
+                        continue
             except:
                 pass
+            
+            # Method 1: Cari heading (h4, h5, h6) yang mengandung nama kategori
+            if not target_section:
+                try:
+                    headings = self.driver.find_elements(By.XPATH, "//h4 | //h5 | //h6")
+                    for heading in headings:
+                        text = heading.text.strip().upper()
+                        if category_upper in text:
+                            # Cari parent section yang berisi kategori ini
+                            try:
+                                # Cari ancestor yang berisi input quantity dan button order
+                                section = heading.find_element(By.XPATH, 
+                                    "./ancestor::*[.//input[@type='number'] or .//select or .//button[contains(text(), 'Order')]][1]")
+                                target_section = section
+                                break
+                            except:
+                                # Jika tidak ada, gunakan heading sebagai starting point
+                                target_section = heading
+                                break
+                except:
+                    pass
             
             # Method 2: Cari dengan text langsung di seluruh halaman
             if not target_section:
@@ -1050,38 +937,35 @@ class SimpleButtonBot:
                     pass
             
             if not target_section:
-                print(f"   ❌ Kategori '{category_name}' tidak ditemukan")
                 return False
             
-            print(f"   ✅ Kategori '{category_name}' ditemukan!")
+            target_container = target_section
+            try:
+                ticket_container = target_section.find_element(
+                    By.XPATH,
+                    "./ancestor::*[contains(@class, 'ticket-item')][1]",
+                )
+                target_container = ticket_container
+            except:
+                pass
             
             # Scroll ke section
-            self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", target_section)
-            self.random_delay(0.5, 1)
+            self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", target_container)
+            self.random_delay(0.2, 0.6)
             
             # Cari dan set quantity
             quantity_set = False
             try:
                 # Cari input number untuk quantity (biasanya ada di dekat kategori)
                 # Cari di section target atau di seluruh halaman dekat kategori
-                quantity_inputs = target_section.find_elements(By.XPATH, 
+                quantity_inputs = target_container.find_elements(By.XPATH, 
                     ".//input[@type='number'] | .//input[contains(@class, 'quantity')] | .//input[contains(@name, 'quantity')]")
-                
-                # Jika tidak ada di section, cari di seluruh halaman setelah kategori
-                if not quantity_inputs:
-                    # Cari semua input number di halaman
-                    all_inputs = self.driver.find_elements(By.XPATH, "//input[@type='number']")
-                    # Ambil yang paling dekat dengan kategori (bisa jadi beberapa input untuk beberapa kategori)
-                    if all_inputs:
-                        # Coba input pertama yang terlihat (biasanya sesuai urutan kategori)
-                        quantity_inputs = [all_inputs[0]]
                 
                 if quantity_inputs:
                     for qty_input in quantity_inputs:
                         try:
                             current_value = qty_input.get_attribute('value') or ''
                             if self._extract_first_int(current_value) == quantity:
-                                print(f"   ✅ Jumlah tiket sudah {quantity}")
                                 quantity_set = True
                                 self.random_delay(0.3, 0.6)
                                 break
@@ -1093,9 +977,8 @@ class SimpleButtonBot:
                             # Verifikasi value sudah ter-set
                             value = qty_input.get_attribute('value')
                             if self._extract_first_int(value) == quantity:
-                                print(f"   ✅ Jumlah tiket di-set ke {quantity}")
                                 quantity_set = True
-                                self.random_delay(0.5, 1)
+                                self.random_delay(0.2, 0.6)
                                 break
                         except:
                             continue
@@ -1103,7 +986,7 @@ class SimpleButtonBot:
                 # Jika tidak ada input number, coba dropdown <select>
                 if not quantity_set:
                     try:
-                        select_elements = target_section.find_elements(
+                        select_elements = target_container.find_elements(
                             By.XPATH,
                             ".//select[contains(@class, 'ticket-types') or contains(@name, 'ticket[') or contains(@id, 'ticket_')] | .//select",
                         )
@@ -1116,9 +999,8 @@ class SimpleButtonBot:
                                     pass
                                 
                                 if self._set_quantity_from_select(select_elem, quantity):
-                                    print(f"   ✅ Jumlah tiket di-set ke {quantity} (via dropdown)")
                                     quantity_set = True
-                                    self.random_delay(0.5, 1)
+                                    self.random_delay(0.2, 0.6)
                                     break
                     except:
                         pass
@@ -1127,23 +1009,25 @@ class SimpleButtonBot:
                 if not quantity_set:
                     try:
                         # Cari button dengan angka yang sesuai quantity
-                        buttons = target_section.find_elements(By.XPATH, 
+                        buttons = target_container.find_elements(By.XPATH, 
                             f".//button[text()='{quantity}'] | .//button[contains(@aria-label, '{quantity}')]")
                         if buttons:
                             buttons[0].click()
-                            print(f"   ✅ Jumlah tiket di-set ke {quantity} (via button)")
                             quantity_set = True
-                            self.random_delay(0.5, 1)
+                            self.random_delay(0.2, 0.6)
                     except:
                         pass
                 
             except Exception as e:
                 print(f"   ⚠️ Error setting quantity: {e}")
             
+            if not quantity_set:
+                return False
+            
             # Cari dan klik tombol Order Now
             try:
                 # Cari tombol Order Now di section atau di seluruh halaman
-                order_buttons = target_section.find_elements(By.XPATH, 
+                order_buttons = target_container.find_elements(By.XPATH, 
                     ".//button[contains(., 'Order') or contains(., 'Pesan')] | " +
                     ".//a[contains(., 'Order') or contains(., 'Pesan')]")
                 
@@ -1155,11 +1039,9 @@ class SimpleButtonBot:
                 
                 if order_buttons:
                     order_btn = order_buttons[0]
-                    print(f"   🖱️ Mengklik tombol Order Now...")
-                    
                     # Scroll ke tombol
                     self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", order_btn)
-                    self.random_delay(0.5, 1)
+                    self.random_delay(0.2, 0.6)
                     
                     # Klik tombol dengan beberapa metode
                     clicked = False
@@ -1179,17 +1061,15 @@ class SimpleButtonBot:
                                 pass
                     
                     if clicked:
-                        self.random_delay(2, 4)
-                        print(f"   ✅ Tombol Order Now diklik!")
+                        self.random_delay(0.6, 1.6)
                         
                         # Jika muncul popup T&C, langsung klik Agree
                         self._click_agree_popup(timeout_seconds=8)
                         
                         # Cek apakah berhasil (halaman checkout/personal information muncul)
-                        self.random_delay(1, 2)
+                        self.random_delay(0.4, 0.9)
                         page_source = self.driver.page_source.lower()
                         if any(keyword in page_source for keyword in ['personal information', 'confirmation', 'checkout', 'select category']):
-                            print(f"   ✅ Halaman checkout/pembelian terdeteksi!")
                             return True
                         
                         # Cek apakah URL berubah
@@ -1199,10 +1079,8 @@ class SimpleButtonBot:
                         
                         return True
                     else:
-                        print(f"   ⚠️ Gagal mengklik tombol Order")
                         return False
                 else:
-                    print(f"   ⚠️ Tombol Order Now tidak ditemukan")
                     return False
                     
             except Exception as e:
@@ -1217,36 +1095,30 @@ class SimpleButtonBot:
     
     def monitor_after_click(self):
         """Monitor setelah tombol diklik"""
-        print("\n👀 Memonitor perubahan halaman...")
         initial_url = self.driver.current_url
         
-        for i in range(15):  # Monitor selama 15 x random delay
+        for _ in range(6):
             try:
                 current_url = self.driver.current_url
                 if current_url != initial_url and current_url.split('#')[0] != initial_url.split('#')[0]:
-                    print(f"\n✅ URL berubah! Halaman baru: {current_url}")
                     break
                 
                 # Cek apakah ada elemen checkout/pembelian
                 page_source = self.driver.page_source.lower()
                 if any(keyword in page_source for keyword in ['checkout', 'pembelian', 'order now', 'select category', 'widget.loket.com']):
-                    print("\n✅ Halaman pembelian/widget terdeteksi!")
                     break
                 
-                self.random_delay(2, 3)
+                self.random_delay(0.5, 1.2)
             except:
-                self.random_delay(2, 3)
+                self.random_delay(0.5, 1.2)
 
 
 def main():
     """Main function"""
-    print("="*60)
-    print("🤖 BOT PENCARI TOMBOL LOKET.COM")
-    print("="*60)
-    print()
+    print("🤖 Bot Loket")
     
     # Input parameter 1: Link konser
-    concert_url = input("📍 Masukkan Link Konser: ").strip()
+    concert_url = input("Link konser: ").strip()
     if not concert_url:
         print("❌ Link konser tidak boleh kosong!")
         return
@@ -1254,29 +1126,17 @@ def main():
     if not concert_url.startswith('http'):
         concert_url = 'https://' + concert_url
     
-    print()
-    
     # Input parameter 2: Text tombol
-    button_text = input("🔘 Masukkan Text Tombol yang ingin dicari (contoh: 'Beli Tiket', 'Order Now', 'Masuk Antrean'): ").strip()
+    button_text = input("Text tombol: ").strip()
     if not button_text:
         print("❌ Text tombol tidak boleh kosong!")
         return
     
-    print()
-    print("="*60)
-    print(f"✅ Konfigurasi:")
-    print(f"   Link: {concert_url}")
-    print(f"   Tombol: '{button_text}'")
-    print("="*60)
-    print()
-    
     # Konfirmasi
-    confirm = input("🚀 Jalankan bot sekarang? (y/n): ").strip().lower()
+    confirm = input("Jalankan? (y/n): ").strip().lower()
     if confirm != 'y':
         print("❌ Dibatalkan")
         return
-    
-    print()
     
     # Jalankan bot
     bot = SimpleButtonBot(concert_url, button_text)
