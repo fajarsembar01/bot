@@ -77,6 +77,26 @@ Bot akan:
 
 **📖 Panduan lengkap**: Lihat [CARA_PAKAI_SIMPLE.md](CARA_PAKAI_SIMPLE.md)
 
+
+## Web Panel (Recommended untuk Staff)
+
+Panel web memudahkan staff menjalankan bot tanpa perlu input di terminal.
+
+Windows:
+```bash
+run_panel.bat
+```
+
+macOS/Linux:
+```bash
+chmod +x run_panel.sh
+./run_panel.sh
+```
+
+Setelah panel jalan, buka `http://127.0.0.1:5000`, isi URL + button text, lalu klik **Start Bot**.
+
+Jika Chrome tidak ditemukan, set environment `CHROME_PATH` ke lokasi Chrome/Chromium Anda.
+
 ## 💻 Cara Menggunakan Bot Advanced (bot_loket.py)
 
 ### Cara 1: Basic Usage

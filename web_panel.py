@@ -1,0 +1,821 @@
+﻿import os
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from threading import Event, Lock, Thread
+from typing import Optional
+from uuid import uuid4
+
+from flask import Flask, redirect, render_template_string, request, url_for
+
+from bot_simple import SimpleButtonBot
+
+app = Flask(__name__)
+
+LOG_DIR = Path(__file__).parent / "logs"
+
+
+class ThreadOutputRouter:
+    def __init__(self, default_stream):
+        self._default_stream = default_stream
+        self._lock = Lock()
+        self._streams = {}
+
+    def register(self, thread_id, stream):
+        with self._lock:
+            self._streams[thread_id] = stream
+
+    def unregister(self, thread_id):
+        with self._lock:
+            self._streams.pop(thread_id, None)
+
+    def write(self, data):
+        stream = self._streams.get(threading.get_ident(), self._default_stream)
+        stream.write(data)
+        try:
+            stream.flush()
+        except:
+            pass
+
+    def flush(self):
+        try:
+            self._default_stream.flush()
+        except:
+            pass
+
+    def isatty(self):
+        try:
+            return self._default_stream.isatty()
+        except:
+            return False
+
+
+STDOUT_ROUTER = ThreadOutputRouter(sys.stdout)
+STDERR_ROUTER = ThreadOutputRouter(sys.stderr)
+sys.stdout = STDOUT_ROUTER
+sys.stderr = STDERR_ROUTER
+
+
+def normalize_debugger_address(raw_value: str) -> str:
+    raw_value = (raw_value or "").strip()
+    if not raw_value:
+        return ""
+    if ":" in raw_value:
+        return raw_value
+    return f"127.0.0.1:{raw_value}"
+
+
+def find_chrome_path() -> str:
+    candidates = []
+    env_path = os.environ.get("CHROME_PATH")
+    if env_path:
+        candidates.append(env_path)
+
+    if sys.platform == "darwin":
+        candidates.extend([
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ])
+    elif sys.platform.startswith("linux"):
+        candidates.extend([
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+        ])
+    else:
+        for key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            base = os.environ.get(key, "")
+            if base:
+                candidates.append(os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"))
+
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome", "chrome.exe"):
+        path_from_which = shutil.which(name)
+        if path_from_which:
+            candidates.append(path_from_which)
+
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return ""
+
+
+def is_port_available(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def find_free_port(start_port: int = 9222, max_tries: int = 50, exclude_ports=None) -> Optional[int]:
+    exclude_ports = exclude_ports or set()
+    port = start_port
+    for _ in range(max_tries):
+        if port not in exclude_ports and is_port_available(port):
+            return port
+        port += 1
+    return None
+
+
+def wait_for_port(port: int, timeout_seconds: float = 6.0) -> bool:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.2)
+            try:
+                sock.connect(("127.0.0.1", port))
+                return True
+            except OSError:
+                time.sleep(0.2)
+    return False
+
+
+def launch_chrome(port: int, profile_dir: Path, start_url: str):
+    chrome_path = find_chrome_path()
+    if not chrome_path:
+        return None, "Chrome tidak ditemukan. Install Chrome atau set CHROME_PATH."
+
+    if not start_url:
+        start_url = "about:blank"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        chrome_path,
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={str(profile_dir)}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--new-window",
+        start_url,
+    ]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return proc, ""
+    except Exception as exc:
+        return None, str(exc)
+
+
+def read_log_tail(path: Path, max_bytes: int = 40000) -> str:
+    if not path.exists():
+        return ""
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        if size > max_bytes:
+            handle.seek(-max_bytes, os.SEEK_END)
+        data = handle.read()
+    return data.decode("utf-8", errors="replace")
+
+
+@dataclass
+class BotTask:
+    task_id: str
+    concert_url: str
+    button_text: str
+    auto_buy: bool
+    ticket_category: str
+    ticket_quantity: int
+    debugger_address: str
+    open_new_tab: bool
+    close_on_exit: bool
+    started_at: datetime
+    user_data_dir: str = ""
+    log_path: str = ""
+    status: str = "starting"
+    error: str = ""
+    stopped_at: Optional[datetime] = None
+    stop_event: Event = field(default_factory=Event)
+    bot: Optional[SimpleButtonBot] = None
+    thread: Optional[Thread] = None
+
+
+TASKS = {}
+TASKS_LOCK = Lock()
+
+
+def is_active(status: str) -> bool:
+    return status in {"starting", "running", "stopping"}
+
+
+def run_bot_task(task: BotTask) -> None:
+    thread_id = threading.get_ident()
+    log_stream = None
+    if task.log_path:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = Path(task.log_path)
+        log_stream = log_path.open("a", encoding="utf-8")
+        STDOUT_ROUTER.register(thread_id, log_stream)
+        STDERR_ROUTER.register(thread_id, log_stream)
+        print(f"=== Bot {task.task_id} started {datetime.now().isoformat(timespec='seconds')} ===")
+
+    task.status = "running"
+    try:
+        task.bot.run()
+        if task.stop_event.is_set():
+            task.status = "stopped"
+        elif not task.bot.setup_success:
+            task.status = "error"
+            task.error = task.bot.last_error or "Gagal setup driver."
+        else:
+            task.status = "finished"
+    except Exception as exc:
+        task.status = "error"
+        task.error = str(exc)
+    finally:
+        task.stopped_at = datetime.now()
+        if log_stream:
+            print(f"=== Bot {task.task_id} selesai ({task.status}) {task.stopped_at.isoformat(timespec='seconds')} ===")
+            STDOUT_ROUTER.unregister(thread_id)
+            STDERR_ROUTER.unregister(thread_id)
+            log_stream.close()
+
+
+TABLE_BODY_TEMPLATE = """
+        {% for task in tasks %}
+        <tr>
+          <td>{{ task.task_id }}</td>
+          <td><span class="status {{ task.status }}">{{ task.status }}</span></td>
+          <td>{{ task.concert_url }}</td>
+          <td>{{ task.button_text }}</td>
+          <td>
+            {% if task.bot and task.bot.auto_buy_running %}
+              {% if task.bot.auto_buy_paused %}
+              <span class="muted">Auto buy: paused ({{ task.ticket_category or '-' }} x{{ task.ticket_quantity or 1 }})</span>
+              {% else %}
+              <span class="muted">Auto buy: running ({{ task.ticket_category or '-' }} x{{ task.ticket_quantity or 1 }})</span>
+              {% endif %}
+            {% elif task.bot and task.bot.awaiting_auto_buy_selection %}
+              <span class="muted">Menunggu pilihan auto-buy</span>
+            {% elif task.auto_buy %}
+              {% if task.ticket_category %}
+              <span class="muted">Auto buy: {{ task.ticket_category }} x{{ task.ticket_quantity }}</span>
+              {% else %}
+              <span class="muted">Auto buy: menunggu widget</span>
+              {% endif %}
+            {% else %}
+              <span class="muted">Manual</span>
+            {% endif %}
+          </td>
+          <td>{{ task.debugger_address or '-' }}</td>
+          <td>{{ task.started_at.strftime('%H:%M:%S') }}</td>
+          <td>{{ task.error or '-' }}</td>
+          <td>
+            {% if task.log_path %}
+            <a href="{{ url_for('view_log', task_id=task.task_id) }}" target="_blank">View</a>
+            {% else %}
+            <span class="muted">-</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if task.status in ['starting', 'running', 'stopping'] %}
+              {% if task.bot and task.bot.awaiting_auto_buy_selection %}
+                {% if task.bot.widget_categories %}
+                <form class="inline-form" method="post" action="{{ url_for('set_auto_buy', task_id=task.task_id) }}">
+                  <select name="ticket_category" required>
+                    {% for name in task.bot.widget_categories %}
+                    <option value="{{ name }}">{{ name }}</option>
+                    {% endfor %}
+                  </select>
+                  <input type="number" name="ticket_quantity" min="1" max="6" value="{{ task.ticket_quantity or 1 }}" />
+                  <button class="btn-start" type="submit">Auto-buy</button>
+                </form>
+                {% else %}
+                <span class="muted">Menunggu kategori widget...</span>
+                {% endif %}
+              {% elif task.bot and task.bot.auto_buy_running %}
+                {% if task.bot.auto_buy_paused %}
+                  <form class="inline-form" method="post" action="{{ url_for('set_auto_buy', task_id=task.task_id) }}">
+                    {% if task.bot.widget_categories %}
+                    <select name="ticket_category" required>
+                      {% for name in task.bot.widget_categories %}
+                      <option value="{{ name }}">{{ name }}</option>
+                      {% endfor %}
+                    </select>
+                    {% else %}
+                    <input type="text" name="ticket_category" placeholder="Nama kategori" required />
+                    {% endif %}
+                    <input type="number" name="ticket_quantity" min="1" max="6" value="{{ task.ticket_quantity or 1 }}" />
+                    <button class="btn-start" type="submit">Update & Resume</button>
+                  </form>
+                  <form method="post" action="{{ url_for('resume_auto_buy', task_id=task.task_id) }}">
+                    <button class="btn-start" type="submit">Resume</button>
+                  </form>
+                {% else %}
+                  <form method="post" action="{{ url_for('pause_auto_buy', task_id=task.task_id) }}">
+                    <button class="btn-stop" type="submit">Pause</button>
+                  </form>
+                {% endif %}
+              {% endif %}
+              <form method="post" action="{{ url_for('stop_bot', task_id=task.task_id) }}">
+                <button class="btn-stop" type="submit">Stop</button>
+              </form>
+            {% else %}
+            <span class="muted">-</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+"""
+
+PAGE_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bot Simple Panel</title>
+  <style>
+    :root {
+      --bg: #0e1116;
+      --card: #161b22;
+      --muted: #94a3b8;
+      --text: #e2e8f0;
+      --accent: #22c55e;
+      --danger: #ef4444;
+      --border: #2b3240;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", Tahoma, sans-serif;
+      background: radial-gradient(circle at top, #1a2233 0%, #0e1116 55%);
+      color: var(--text);
+    }
+    .wrap {
+      max-width: 1100px;
+      margin: 32px auto 64px;
+      padding: 0 20px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      letter-spacing: 0.4px;
+    }
+    p {
+      margin: 4px 0 12px;
+      color: var(--muted);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+      margin-top: 18px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 6px;
+      color: var(--muted);
+    }
+    input[type="text"],
+    input[type="number"],
+    select {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #0b0f15;
+      color: var(--text);
+      margin-bottom: 12px;
+    }
+    select { cursor: pointer; }
+    .row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .inline-form {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .inline-form select,
+    .inline-form input[type="number"] {
+      margin-bottom: 0;
+      min-width: 140px;
+      flex: 1 1 160px;
+    }
+    .inline-form button {
+      padding: 8px 10px;
+    }
+    .checkbox {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    button {
+      border: none;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-start {
+      background: var(--accent);
+      color: #0b0f15;
+    }
+    .btn-stop {
+      background: transparent;
+      color: var(--danger);
+      border: 1px solid var(--danger);
+    }
+    .alert {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      color: #fecaca;
+      padding: 10px 12px;
+      border-radius: 10px;
+      margin-top: 12px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 13px;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 8px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    .status {
+      display: inline-flex;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      background: #0b0f15;
+      border: 1px solid var(--border);
+    }
+    .status.running { color: #38bdf8; }
+    .status.stopped { color: #fbbf24; }
+    .status.finished { color: #22c55e; }
+    .status.error { color: #f87171; }
+    .muted { color: var(--muted); }
+    pre {
+      background: #0b0f15;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Bot Simple Panel</h1>
+    <p>Jalankan beberapa bot dengan sesi Chrome berbeda menggunakan remote debugging.</p>
+    <div class="card">
+      <p class="muted">Contoh buka Chrome dengan port berbeda:</p>
+      <pre>"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\\temp\\chrome-profile-1"
+"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9223 --user-data-dir="C:\\temp\\chrome-profile-2"</pre>
+    </div>
+
+    {% if error %}
+    <div class="alert">{{ error }}</div>
+    {% endif %}
+
+    <div class="grid">
+      <form class="card" method="post" action="{{ url_for('start_bot') }}">
+        <label for="concert_url">Concert URL</label>
+        <input id="concert_url" name="concert_url" type="text" placeholder="https://example.com" required />
+
+        <label for="button_text">Button text</label>
+        <input id="button_text" name="button_text" type="text" placeholder="Beli Tiket" required />
+
+        <div class="row">
+          <label class="checkbox"><input type="checkbox" name="auto_launch" checked /> Auto launch (isolated profile)</label>
+        </div>
+        <p class="muted" style="margin: 0 0 12px;">Jika dicentang, bot buka Chrome baru dengan profile terpisah (session beda).</p>
+
+        <label for="debugger_address">Debugger address (optional)</label>
+        <input id="debugger_address" name="debugger_address" type="text" placeholder="127.0.0.1:9222 or 9222" />
+
+        <div class="row">
+          <label class="checkbox"><input type="checkbox" name="open_new_tab" checked /> Open new tab (for debugger)</label>
+          <label class="checkbox"><input type="checkbox" name="close_on_exit" /> Close browser on stop</label>
+        </div>
+
+        <div style="margin-top: 12px;">
+          <button class="btn-start" type="submit">Start Bot</button>
+        </div>
+      </form>
+
+      <div class="card">
+        <h3>Notes</h3>
+        <p class="muted">- Centang Auto launch supaya bot buka Chrome baru dengan profile terpisah.</p>
+        <p class="muted">- Satu bot per debugger address untuk menghindari tab bentrok.</p>
+        <p class="muted">- Jika Auto launch mati dan debugger address kosong, bot membuka Chrome baru.</p>
+        <p class="muted">- Untuk Chrome yang sudah dibuka, gunakan port berbeda untuk sesi berbeda.</p>
+        <p class="muted">- Auto buy bisa dipilih setelah widget terbuka dari daftar kategori.</p>
+      </div>
+    </div>
+
+    <h2 style="margin-top: 28px;">Bots</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Status</th>
+          <th>URL</th>
+          <th>Button</th>
+          <th>Auto buy</th>
+          <th>Debugger</th>
+          <th>Started</th>
+          <th>Info</th>
+          <th>Log</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="tasks-body">{{ table_body|safe }}</tbody>
+    </table>
+  </div>
+  <script>
+    (function () {
+      const refreshIntervalMs = 2000;
+      const tbody = document.getElementById("tasks-body");
+      if (!tbody) {
+        return;
+      }
+      function isFormActive() {
+        const active = document.activeElement;
+        if (!active) {
+          return false;
+        }
+        if (active.closest && active.closest("form")) {
+          return true;
+        }
+        const tag = active.tagName ? active.tagName.toLowerCase() : "";
+        return tag === "input" || tag === "select" || tag === "textarea";
+      }
+
+      async function refreshTasks() {
+        if (isFormActive()) {
+          return;
+        }
+        try {
+          const response = await fetch("{{ url_for('task_rows') }}", { cache: "no-store" });
+          if (!response.ok) {
+            return;
+          }
+          const html = await response.text();
+          tbody.innerHTML = html;
+        } catch (err) {
+          return;
+        }
+      }
+
+      refreshTasks();
+      setInterval(refreshTasks, refreshIntervalMs);
+    })();
+  </script>
+</body>
+</html>
+"""
+
+
+LOG_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="refresh" content="2" />
+  <title>Bot Log</title>
+  <style>
+    :root {
+      --bg: #0e1116;
+      --card: #161b22;
+      --muted: #94a3b8;
+      --text: #e2e8f0;
+      --border: #2b3240;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", Tahoma, sans-serif;
+      background: radial-gradient(circle at top, #1a2233 0%, #0e1116 55%);
+      color: var(--text);
+    }
+    .wrap {
+      max-width: 1000px;
+      margin: 24px auto;
+      padding: 0 20px 40px;
+    }
+    a { color: #38bdf8; text-decoration: none; }
+    .muted { color: var(--muted); }
+    pre {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      white-space: pre-wrap;
+      min-height: 300px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Log Bot {{ task.task_id }}</h1>
+    <p class="muted">Status: {{ task.status }} | Refresh otomatis 2 detik</p>
+    <p><a href="{{ url_for('index') }}">Back to panel</a></p>
+    <pre>{{ log_content }}</pre>
+  </div>
+</body>
+</html>
+"""
+
+@app.get("/")
+def index():
+    error = request.args.get("error", "")
+    with TASKS_LOCK:
+        tasks = sorted(TASKS.values(), key=lambda t: t.started_at, reverse=True)
+    table_body = render_template_string(TABLE_BODY_TEMPLATE, tasks=tasks)
+    return render_template_string(PAGE_TEMPLATE, tasks=tasks, error=error, table_body=table_body)
+
+
+@app.get("/tasks/rows")
+def task_rows():
+    with TASKS_LOCK:
+        tasks = sorted(TASKS.values(), key=lambda t: t.started_at, reverse=True)
+    return render_template_string(TABLE_BODY_TEMPLATE, tasks=tasks)
+
+
+@app.post("/start")
+def start_bot():
+    concert_url = (request.form.get("concert_url") or "").strip()
+    button_text = (request.form.get("button_text") or "").strip()
+    auto_launch = request.form.get("auto_launch") == "on"
+    debugger_address = normalize_debugger_address(request.form.get("debugger_address"))
+    open_new_tab = request.form.get("open_new_tab") == "on"
+    close_on_exit = request.form.get("close_on_exit") == "on"
+
+    if not concert_url or not button_text:
+        return redirect(url_for("index", error="Concert URL dan button text wajib diisi."))
+
+    if not concert_url.startswith("http"):
+        concert_url = "https://" + concert_url
+
+    auto_buy = False
+    ticket_category = ""
+    ticket_quantity = 1
+
+    task_id = uuid4().hex[:8]
+    user_data_dir = ""
+    if auto_launch:
+        profile_dir = Path(__file__).parent / "chrome_profiles" / f"profile-{task_id}"
+        user_data_dir = str(profile_dir)
+        debugger_address = ""
+        open_new_tab = False
+
+    if debugger_address:
+        with TASKS_LOCK:
+            for task in TASKS.values():
+                if is_active(task.status) and task.debugger_address == debugger_address:
+                    return redirect(url_for("index", error="Debugger address sudah dipakai bot lain."))
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = str(LOG_DIR / f"bot-{task_id}.log")
+    task = BotTask(
+        task_id=task_id,
+        concert_url=concert_url,
+        button_text=button_text,
+        auto_buy=auto_buy,
+        ticket_category=ticket_category,
+        ticket_quantity=ticket_quantity,
+        debugger_address=debugger_address,
+        open_new_tab=open_new_tab,
+        close_on_exit=close_on_exit,
+        started_at=datetime.now(),
+        user_data_dir=user_data_dir,
+        log_path=log_path,
+    )
+    task.bot = SimpleButtonBot(
+        concert_url,
+        button_text,
+        auto_buy=auto_buy,
+        ticket_category=ticket_category or None,
+        ticket_quantity=ticket_quantity,
+        debugger_address=debugger_address or None,
+        open_new_tab=open_new_tab,
+        user_data_dir=user_data_dir or None,
+        stop_event=task.stop_event,
+        close_on_exit=close_on_exit,
+        interactive=False,
+    )
+    task.thread = Thread(target=run_bot_task, args=(task,), daemon=True)
+
+    with TASKS_LOCK:
+        TASKS[task_id] = task
+
+    task.thread.start()
+    return redirect(url_for("index"))
+
+
+@app.post("/auto-buy/<task_id>")
+def set_auto_buy(task_id: str):
+    ticket_category = (request.form.get("ticket_category") or "").strip()
+    ticket_quantity_raw = (request.form.get("ticket_quantity") or "").strip()
+
+    if not ticket_category:
+        return redirect(url_for("index", error="Kategori tiket wajib diisi untuk auto buy."))
+
+    ticket_quantity = 1
+    if ticket_quantity_raw:
+        if not ticket_quantity_raw.isdigit():
+            return redirect(url_for("index", error="Jumlah tiket harus angka (1-6)."))
+        ticket_quantity = int(ticket_quantity_raw)
+    if ticket_quantity < 1 or ticket_quantity > 6:
+        return redirect(url_for("index", error="Jumlah tiket harus antara 1-6."))
+
+    with TASKS_LOCK:
+        task = TASKS.get(task_id)
+        if not task or not task.bot:
+            return redirect(url_for("index", error="Bot tidak ditemukan."))
+        if not is_active(task.status):
+            return redirect(url_for("index", error="Bot sudah selesai atau berhenti."))
+        task.auto_buy = True
+        task.ticket_category = ticket_category
+        task.ticket_quantity = ticket_quantity
+        bot = task.bot
+
+    bot.set_auto_buy_selection(ticket_category, ticket_quantity)
+    if bot.auto_buy_running and bot.auto_buy_paused:
+        bot.resume_auto_buy()
+    return redirect(url_for("index"))
+
+
+@app.post("/auto-buy/<task_id>/pause")
+def pause_auto_buy(task_id: str):
+    with TASKS_LOCK:
+        task = TASKS.get(task_id)
+        if not task or not task.bot:
+            return redirect(url_for("index", error="Bot tidak ditemukan."))
+        if not is_active(task.status):
+            return redirect(url_for("index", error="Bot sudah selesai atau berhenti."))
+        bot = task.bot
+
+    if not bot.pause_auto_buy():
+        return redirect(url_for("index", error="Auto-buy belum berjalan."))
+    return redirect(url_for("index"))
+
+
+@app.post("/auto-buy/<task_id>/resume")
+def resume_auto_buy(task_id: str):
+    with TASKS_LOCK:
+        task = TASKS.get(task_id)
+        if not task or not task.bot:
+            return redirect(url_for("index", error="Bot tidak ditemukan."))
+        if not is_active(task.status):
+            return redirect(url_for("index", error="Bot sudah selesai atau berhenti."))
+        bot = task.bot
+
+    if not bot.resume_auto_buy():
+        return redirect(url_for("index", error="Auto-buy belum berjalan."))
+    return redirect(url_for("index"))
+
+
+
+@app.get("/logs/<task_id>")
+def view_log(task_id: str):
+    with TASKS_LOCK:
+        task = TASKS.get(task_id)
+    if not task or not task.log_path:
+        return "Log not found", 404
+    log_content = read_log_tail(Path(task.log_path))
+    return render_template_string(LOG_TEMPLATE, task=task, log_content=log_content)
+
+
+@app.post("/stop/<task_id>")
+def stop_bot(task_id: str):
+    with TASKS_LOCK:
+        task = TASKS.get(task_id)
+    if task and is_active(task.status):
+        task.status = "stopping"
+        task.stop_event.set()
+        if task.bot:
+            task.bot.request_stop()
+    return redirect(url_for("index"))
+
+
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=5000, debug=False)

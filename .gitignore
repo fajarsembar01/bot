@@ -28,4 +28,6 @@ Thumbs.db
 # Selenium
 chromedriver
 geckodriver
+chrome_profiles/
+logs/
 

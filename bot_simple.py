@@ -4,10 +4,12 @@ Refresh setiap 0.5-4 detik (random) dan cari tombol berdasarkan text
 Auto beli tiket setelah masuk widget Loket
 """
 import time
+import os
 import sys
 import random
 import re
 from datetime import datetime
+from threading import Event
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
@@ -18,7 +20,20 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 
 class SimpleButtonBot:
-    def __init__(self, concert_url, button_text, auto_buy=False, ticket_category=None, ticket_quantity=1):
+    def __init__(
+        self,
+        concert_url,
+        button_text,
+        auto_buy=False,
+        ticket_category=None,
+        ticket_quantity=1,
+        debugger_address=None,
+        open_new_tab=False,
+        user_data_dir=None,
+        stop_event=None,
+        close_on_exit=None,
+        interactive=True,
+    ):
         self.concert_url = concert_url
         self.button_text = button_text
         self.auto_buy = auto_buy
@@ -27,7 +42,21 @@ class SimpleButtonBot:
         self.loop_delay_min = 0.5
         self.loop_delay_max = 4
         self.auto_buy_prompted = False
+        self.debugger_address = debugger_address
+        self.open_new_tab = open_new_tab
+        self.user_data_dir = user_data_dir
+        self.stop_event = stop_event
+        self.close_on_exit = close_on_exit
+        self.interactive = interactive
+        self.setup_success = False
+        self.last_error = ""
         self.driver = None
+        self.auto_buy_selection_event = Event()
+        self.awaiting_auto_buy_selection = False
+        self.widget_categories = []
+        self.widget_ready = False
+        self.auto_buy_running = False
+        self.auto_buy_paused = False
     
     def random_delay(self, min_seconds=0.5, max_seconds=4):
         """Random delay antara min dan max seconds"""
@@ -38,42 +67,146 @@ class SimpleButtonBot:
         delay = random.uniform(min_seconds, max_seconds)
         time.sleep(delay)
         return round(delay, 1)
-        
+
+    def request_stop(self):
+        """Request bot to stop gracefully."""
+        if self.stop_event:
+            self.stop_event.set()
+
+    def pause_auto_buy(self):
+        if not self.auto_buy_running:
+            return False
+        self.auto_buy_paused = True
+        return True
+
+    def resume_auto_buy(self):
+        if not self.auto_buy_running:
+            return False
+        self.auto_buy_paused = False
+        return True
+
+    def set_auto_buy_selection(self, category, quantity):
+        """Set auto-buy selection from external controller."""
+        category = (category or "").strip()
+        if not category:
+            return False
+        try:
+            quantity = int(quantity)
+        except:
+            quantity = self.ticket_quantity or 1
+        if quantity < 1 or quantity > 6:
+            quantity = 1
+        self.auto_buy = True
+        self.ticket_category = category
+        self.ticket_quantity = quantity
+        self.awaiting_auto_buy_selection = False
+        try:
+            self.auto_buy_selection_event.set()
+        except:
+            pass
+        return True
+
+    def _should_stop(self):
+        return self.stop_event is not None and self.stop_event.is_set()
+
     def setup_driver(self):
         """Setup Chrome WebDriver"""
-        print("🔧 Browser...")
+        print("Browser...")
         chrome_options = Options()
-        
-        # Anti-detection options
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        chrome_options.add_experimental_option('useAutomationExtension', False)
-        
-        # User agent
-        chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        self.setup_success = False
+        self.last_error = ""
+        if self.debugger_address:
+            chrome_options.add_experimental_option("debuggerAddress", self.debugger_address)
+        else:
+            # Anti-detection options
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_options.add_experimental_option('useAutomationExtension', False)
+            
+            # User agent
+            chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            if self.user_data_dir:
+                chrome_options.add_argument(f"--user-data-dir={os.path.abspath(self.user_data_dir)}")
         
         try:
-            service = Service(ChromeDriverManager().install())
-            self.driver = webdriver.Chrome(service=service, options=chrome_options)
-            self.driver.maximize_window()
+            driver_errors = []
+            driver = None
+
+            chromedriver_path = os.environ.get("CHROMEDRIVER_PATH", "").strip()
+            if chromedriver_path:
+                try:
+                    service = Service(chromedriver_path)
+                    driver = webdriver.Chrome(service=service, options=chrome_options)
+                except Exception as e:
+                    driver_errors.append(f"CHROMEDRIVER_PATH failed: {e}")
+
+            if not driver:
+                try:
+                    # Prefer Selenium Manager (auto-detect driver per OS/arch)
+                    driver = webdriver.Chrome(options=chrome_options)
+                except Exception as e:
+                    driver_errors.append(f"Selenium Manager failed: {e}")
+
+            if not driver:
+                try:
+                    service = Service(ChromeDriverManager().install())
+                    driver = webdriver.Chrome(service=service, options=chrome_options)
+                except Exception as e:
+                    driver_errors.append(f"webdriver-manager failed: {e}")
+
+            if not driver:
+                raise Exception(" | ".join(driver_errors) or "Driver init failed")
+
+            self.driver = driver
+            if not self.debugger_address:
+                self.driver.maximize_window()
             
             # Anti-detection script
-            self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
-                'source': '''
-                    Object.defineProperty(navigator, 'webdriver', {
-                        get: () => undefined
-                    })
-                '''
-            })
+            try:
+                self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+                    'source': '''
+                        Object.defineProperty(navigator, 'webdriver', {
+                            get: () => undefined
+                        })
+                    '''
+                })
+            except:
+                pass
+
+            if self.debugger_address and self.open_new_tab:
+                if not self._open_new_tab():
+                    print("Warning: gagal buka tab baru, lanjutkan tab aktif.")
             
-            print("✅ Browser siap")
+            print("Browser siap")
+            self.setup_success = True
             return True
         except Exception as e:
-            print(f"❌ Error setting up browser: {e}")
+            self.last_error = str(e)
+            if self.debugger_address:
+                print(f"Error attach ke Chrome ({self.debugger_address}): {e}")
+                print("Tip: jalankan Chrome dengan --remote-debugging-port=9222 dan --user-data-dir untuk session terpisah.")
+            else:
+                print(f"Error setting up browser: {e}")
             return False
-    
+
+    def _open_new_tab(self):
+        """Buka tab baru lalu pindah ke tab tersebut."""
+        try:
+            self.driver.switch_to.new_window("tab")
+            return True
+        except:
+            try:
+                self.driver.execute_script("window.open('about:blank','_blank');")
+                handles = self.driver.window_handles
+                if handles:
+                    self.driver.switch_to.window(handles[-1])
+                    return True
+            except:
+                pass
+        return False
+
     def find_buttons_by_text(self):
         """Cari SEMUA tombol berdasarkan text (bukan hanya satu)"""
         try:
@@ -360,10 +493,18 @@ class SimpleButtonBot:
             initial_url = self.driver.current_url
             
             while True:
+                if self._should_stop():
+                    print("\nStop requested. Exiting loop.")
+                    break
                 try:
                     refresh_count += 1
                     current_time = datetime.now().strftime('%H:%M:%S')
                     current_url = self.driver.current_url
+
+                    if self._is_widget_url(current_url):
+                        self._handle_widget_page(current_url)
+                        self.monitor_after_click()
+                        break
                     
                     # CEK DULU: Apakah URL sudah berubah dari URL awal?
                     url_before_check = current_url.split('#')[0].split('?')[0].strip().rstrip('/')
@@ -375,9 +516,8 @@ class SimpleButtonBot:
                             print(f"\n✅ URL berubah: {current_url}")
                             
                             # Cek apakah ini widget Loket, jika ya tanya apakah mau auto beli
-                            if 'widget.loket.com' in current_url or 'loket.com/widget' in current_url:
-                                if self._should_prompt_auto_buy(current_url):
-                                    self.handle_widget_loket_auto_buy()
+                            if self._is_widget_url(current_url):
+                                self._handle_widget_page(current_url)
                             
                             self.monitor_after_click()
                             break
@@ -394,6 +534,8 @@ class SimpleButtonBot:
                         
                         # COBA SEMUA TOMBOL sampai salah satunya benar-benar berhasil
                         for idx, button in enumerate(buttons, 1):
+                            if self._should_stop():
+                                break
                             try:
                                 status = self.check_button_status(button)
                                 
@@ -421,9 +563,8 @@ class SimpleButtonBot:
                                         print(f"\n✅ Klik berhasil: {url_after_click}")
                                         
                                         # Cek apakah ini widget Loket, jika ya tanya apakah mau auto beli
-                                        if 'widget.loket.com' in url_after_click or 'loket.com/widget' in url_after_click:
-                                            if self._should_prompt_auto_buy(url_after_click):
-                                                self.handle_widget_loket_auto_buy()
+                                        if self._is_widget_url(url_after_click):
+                                            self._handle_widget_page(url_after_click)
                                         
                                         # Monitor sebentar untuk memastikan
                                         self.monitor_after_click()
@@ -441,15 +582,25 @@ class SimpleButtonBot:
                                 continue
                         
                         # Jika semua tombol sudah dicoba dan tidak ada yang berhasil, tetap loop
+                        if self._should_stop():
+                            break
                         if not success:
                             print("\n⏳ Belum berhasil, refresh...")
                     else:
                         # Tombol tidak ditemukan
                         if last_status is not None:
                             last_status = None
+
+                    current_url = self.driver.current_url
+                    if self._is_widget_url(current_url):
+                        self._handle_widget_page(current_url)
+                        self.monitor_after_click()
+                        break
                     
                     # Refresh halaman setiap 0.5-4 detik random (TETAP LOOP sampai URL berubah)
-                    self.random_delay(self.loop_delay_min, self.loop_delay_max)
+                    self.random_delay(0.1, 1.0)
+                    if self._should_stop():
+                        break
                     self.driver.refresh()
                     self.random_delay(0.4, 1.0)  # Tunggu halaman selesai load setelah refresh
                     
@@ -461,9 +612,8 @@ class SimpleButtonBot:
                             print(f"\n✅ URL berubah: {new_url}")
                             
                             # Cek apakah ini widget Loket, jika ya tanya apakah mau auto beli
-                            if 'widget.loket.com' in new_url or 'loket.com/widget' in new_url:
-                                if self._should_prompt_auto_buy(new_url):
-                                    self.handle_widget_loket_auto_buy()
+                            if self._is_widget_url(new_url):
+                                self._handle_widget_page(new_url)
                             
                             self.monitor_after_click()
                             break
@@ -494,17 +644,25 @@ class SimpleButtonBot:
             import traceback
             traceback.print_exc()
         finally:
-            print("\nTutup browser? (y/n): ", end="")
-            try:
-                response = input().strip().lower()
-                if response == 'y':
-                    if self.driver:
-                        self.driver.quit()
-                        print("✅ Browser ditutup")
+            if self.close_on_exit is None:
+                if self.interactive:
+                    print("\nTutup browser? (y/n): ", end="")
+                    try:
+                        response = input().strip().lower()
+                        if response == 'y':
+                            if self.driver:
+                                self.driver.quit()
+                                print("? Browser ditutup")
+                        else:
+                            print("? Browser tetap terbuka")
+                    except:
+                        if self.driver:
+                            self.driver.quit()
                 else:
-                    print("✅ Browser tetap terbuka")
-            except:
-                if self.driver:
+                    if self.driver and not self.debugger_address:
+                        self.driver.quit()
+            else:
+                if self.close_on_exit and self.driver:
                     self.driver.quit()
     
     def _verify_page_change(self, url_before, url_after):
@@ -575,6 +733,14 @@ class SimpleButtonBot:
         
         self.auto_buy_prompted = True
         print(f"\n🎫 Widget terbuka: {current_url}")
+
+        if not self.interactive:
+            if self.auto_buy and self.ticket_category:
+                self.auto_buy_ticket(self.ticket_category, self.ticket_quantity)
+                return
+            self._wait_for_auto_buy_selection()
+            return
+
         
         # Tanya apakah mau auto beli
         auto_buy = input("Auto buy? (y/n): ").strip().lower()
@@ -627,40 +793,58 @@ class SimpleButtonBot:
     
     def auto_buy_ticket(self, category_name, quantity):
         """Auto beli tiket di widget Loket"""
-        print(f"\n🔄 Auto-buy: {category_name} x{quantity}")
-        
+        print(f"\nAuto-buy: {category_name} x{quantity}")
+
         attempt = 0
         max_attempts = 1000  # Loop sampai berhasil
-        
-        while attempt < max_attempts:
-            attempt += 1
-            current_time = datetime.now().strftime('%H:%M:%S')
-            
-            print(f"[{current_time}] Attempt #{attempt}", end='\r')
-            
-            try:
-                # Refresh halaman
-                self.driver.refresh()
-                self.random_delay(self.loop_delay_min, self.loop_delay_max)
-                
-                # Cari kategori tiket
-                category_found = self.find_and_select_ticket_category(category_name, quantity)
-                
-                if category_found:
-                    print(f"\n✅ Siap: {category_name} x{quantity}")
-                    return True
-                else:
-                    pass
+        self.auto_buy_running = True
+        self.auto_buy_paused = False
+
+        try:
+            while attempt < max_attempts:
+                if self._should_stop():
+                    print("\nStop requested. Exiting auto-buy.")
+                    return False
+                if self.auto_buy_paused:
+                    self.random_delay(0.4, 0.8)
+                    continue
+
+                current_category = self.ticket_category or category_name
+                current_quantity = self.ticket_quantity or quantity
+
+                attempt += 1
+                current_time = datetime.now().strftime('%H:%M:%S')
+
+                print(f"[{current_time}] Attempt #{attempt}", end='\r')
+
+                try:
+                    # Refresh halaman
+                    self.driver.refresh()
+                    self._click_privacy_popup(timeout_seconds=2)
+                    self.random_delay(self.loop_delay_min, self.loop_delay_max)
+                    if self.auto_buy_paused:
+                        continue
+
+                    # Cari kategori tiket
+                    category_found = self.find_and_select_ticket_category(current_category, current_quantity)
                     
-            except KeyboardInterrupt:
-                print("\n\n⚠️ Dihentikan")
-                return False
-            except Exception as e:
-                print(f"\n⚠️ Error: {e}")
-                self.random_delay(0.6, 1.2)
-        
+                    if category_found:
+                        print(f"\nSiap: {current_category} x{current_quantity}")
+                        return True
+                    else:
+                        pass
+
+                except KeyboardInterrupt:
+                    print("\n\nDihentikan")
+                    return False
+                except Exception as e:
+                    print(f"\nError: {e}")
+                    self.random_delay(0.6, 1.2)
+        finally:
+            self.auto_buy_running = False
+            self.auto_buy_paused = False
+
         return False
-    
     def _extract_first_int(self, text):
         """Ambil angka pertama dari string"""
         try:
@@ -754,6 +938,152 @@ class SimpleButtonBot:
         if any(step in url for step in ['register', 'checkout', 'confirmation', 'payment', 'personal']):
             return False
         return True
+
+    def _is_widget_url(self, url):
+        """Return True if URL looks like Loket widget page."""
+        if not url:
+            return False
+        url_lower = url.lower()
+        return "widget.loket.com/widget" in url_lower or "loket.com/widget" in url_lower
+
+    def _handle_widget_page(self, current_url):
+        """Handle widget page actions such as privacy popup and auto-buy."""
+        self.widget_ready = True
+        self._click_privacy_popup(timeout_seconds=6)
+        if self._should_prompt_auto_buy(current_url):
+            self.handle_widget_loket_auto_buy()
+
+    def _wait_for_auto_buy_selection(self):
+        self.awaiting_auto_buy_selection = True
+        try:
+            self.auto_buy_selection_event.clear()
+        except:
+            pass
+
+        categories = []
+        for _ in range(6):
+            categories = self._collect_ticket_categories()
+            if categories:
+                break
+            self.random_delay(0.4, 0.8)
+        self.widget_categories = categories
+
+        if categories:
+            print("Auto-buy siap dipilih dari panel.")
+        else:
+            print("Auto-buy menunggu kategori widget.")
+
+        last_scan = time.time()
+        while not self._should_stop():
+            if self.auto_buy and self.ticket_category:
+                self.awaiting_auto_buy_selection = False
+                self.auto_buy_ticket(self.ticket_category, self.ticket_quantity)
+                return
+
+            if time.time() - last_scan > 1.5:
+                self._click_privacy_popup(timeout_seconds=1)
+                new_categories = self._collect_ticket_categories()
+                if new_categories:
+                    self.widget_categories = new_categories
+                last_scan = time.time()
+
+            try:
+                self.auto_buy_selection_event.wait(timeout=0.5)
+            except:
+                self.random_delay(0.4, 0.8)
+
+        self.awaiting_auto_buy_selection = False
+
+    def _page_has_privacy_banner(self):
+        try:
+            page_source = (self.driver.page_source or "").lower()
+            return "we value your privacy" in page_source
+        except:
+            return False
+
+    def _try_click_privacy_popup(self):
+        if not self._page_has_privacy_banner():
+            return False
+
+        try:
+            buttons = self.driver.find_elements(By.XPATH, "//button | //a | //*[@role='button']")
+        except:
+            return False
+
+        for btn in buttons:
+            try:
+                if not btn.is_displayed():
+                    continue
+            except:
+                pass
+
+            text = (btn.text or "").strip().lower()
+            if not text:
+                try:
+                    text = (btn.get_attribute("aria-label") or "").strip().lower()
+                except:
+                    text = ""
+
+            if not text:
+                continue
+
+            if any(token in text for token in ("accept", "agree", "setuju")):
+                try:
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
+                        btn,
+                    )
+                    self.random_delay(0.2, 0.4)
+                except:
+                    pass
+
+                try:
+                    btn.click()
+                except:
+                    try:
+                        self.driver.execute_script("arguments[0].click();", btn)
+                    except:
+                        return False
+
+                print("Privacy accept clicked.")
+                self.random_delay(0.2, 0.5)
+                return True
+
+        return False
+
+    def _try_click_privacy_popup_in_iframes(self):
+        try:
+            frames = self.driver.find_elements(By.TAG_NAME, "iframe")
+        except:
+            return False
+
+        for frame in frames:
+            try:
+                self.driver.switch_to.frame(frame)
+                if self._try_click_privacy_popup():
+                    return True
+            except:
+                pass
+            finally:
+                try:
+                    self.driver.switch_to.default_content()
+                except:
+                    pass
+
+        return False
+
+    def _click_privacy_popup(self, timeout_seconds=6):
+        """Click Accept on the privacy popup if it appears."""
+        end_time = time.time() + timeout_seconds
+        while time.time() < end_time:
+            if self._should_stop():
+                return False
+            if self._try_click_privacy_popup():
+                return True
+            if self._try_click_privacy_popup_in_iframes():
+                return True
+            self.random_delay(0.2, 0.5)
+        return False
     
     def _set_quantity_from_select(self, select_elem, quantity):
         """Set quantity dari elemen <select>"""
@@ -1098,6 +1428,8 @@ class SimpleButtonBot:
         initial_url = self.driver.current_url
         
         for _ in range(6):
+            if self._should_stop():
+                return
             try:
                 current_url = self.driver.current_url
                 if current_url != initial_url and current_url.split('#')[0] != initial_url.split('#')[0]:
@@ -1131,6 +1463,22 @@ def main():
     if not button_text:
         print("❌ Text tombol tidak boleh kosong!")
         return
+
+    # Pilih mode Chrome
+    use_existing = input("Gunakan Chrome yang sudah dibuka? (y/n): ").strip().lower()
+    debugger_address = None
+    open_new_tab = False
+    if use_existing == 'y':
+        print("Catatan: Chrome harus dijalankan dengan --remote-debugging-port.")
+        raw_addr = input("Remote debugging address (default 127.0.0.1:9222 atau isi port saja): ").strip()
+        if not raw_addr:
+            debugger_address = "127.0.0.1:9222"
+        elif ":" in raw_addr:
+            debugger_address = raw_addr
+        else:
+            debugger_address = f"127.0.0.1:{raw_addr}"
+        open_new_tab = True
+
     
     # Konfirmasi
     confirm = input("Jalankan? (y/n): ").strip().lower()
@@ -1139,7 +1487,12 @@ def main():
         return
     
     # Jalankan bot
-    bot = SimpleButtonBot(concert_url, button_text)
+    bot = SimpleButtonBot(
+        concert_url,
+        button_text,
+        debugger_address=debugger_address,
+        open_new_tab=open_new_tab,
+    )
     bot.run()
 
 
