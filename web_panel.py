@@ -1,4 +1,5 @@
-﻿import os
+﻿import json
+import os
 import shutil
 import socket
 import subprocess
@@ -10,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Optional
+import urllib.request
 from uuid import uuid4
 
 from flask import Flask, redirect, render_template_string, request, url_for
@@ -139,7 +141,7 @@ def wait_for_port(port: int, timeout_seconds: float = 6.0) -> bool:
     return False
 
 
-def launch_chrome(port: int, profile_dir: Path, start_url: str):
+def launch_chrome(port: Optional[int], profile_dir: Path, start_url: str):
     chrome_path = find_chrome_path()
     if not chrome_path:
         return None, "Chrome tidak ditemukan. Install Chrome atau set CHROME_PATH."
@@ -147,20 +149,70 @@ def launch_chrome(port: int, profile_dir: Path, start_url: str):
     if not start_url:
         start_url = "about:blank"
     profile_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        chrome_path,
-        f"--remote-debugging-port={port}",
+    args = []
+    if port:
+        args.append(f"--remote-debugging-port={port}")
+    args.extend([
         f"--user-data-dir={str(profile_dir)}",
         "--no-first-run",
         "--no-default-browser-check",
         "--new-window",
         start_url,
-    ]
+    ])
+    if sys.platform == "darwin" and ".app/Contents/MacOS/" in chrome_path:
+        app_path = chrome_path.split(".app/Contents/MacOS/")[0] + ".app"
+        cmd = ["open", "-g", "-n", "-a", app_path, "--args", *args]
+    else:
+        cmd = [chrome_path, *args]
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return proc, ""
     except Exception as exc:
         return None, str(exc)
+
+
+def activate_chrome_target(debugger_address: str) -> str:
+    address = (debugger_address or "").strip()
+    if not address:
+        return "Debugger address kosong."
+    if not address.startswith("http://") and not address.startswith("https://"):
+        address = "http://" + address
+
+    targets = None
+    for path in ("/json/list", "/json"):
+        try:
+            with urllib.request.urlopen(address + path, timeout=2) as response:
+                data = json.load(response)
+            if isinstance(data, list):
+                targets = data
+                break
+        except Exception:
+            continue
+
+    if targets is None:
+        return "Chrome tidak merespon port debugging."
+    if not targets:
+        return "Tidak ada target tab di Chrome."
+
+    target_id = ""
+    for target in targets:
+        if target.get("type") == "page":
+            target_id = target.get("id") or target.get("targetId") or ""
+            if target_id:
+                break
+    if not target_id:
+        first = targets[0]
+        target_id = first.get("id") or first.get("targetId") or ""
+
+    if not target_id:
+        return "Tidak ada target tab di Chrome."
+
+    try:
+        with urllib.request.urlopen(f"{address}/json/activate/{target_id}", timeout=2) as response:
+            response.read()
+    except Exception:
+        return "Gagal mengaktifkan tab Chrome."
+    return ""
 
 
 def read_log_tail(path: Path, max_bytes: int = 40000) -> str:
@@ -240,85 +292,97 @@ def run_bot_task(task: BotTask) -> None:
 TABLE_BODY_TEMPLATE = """
         {% for task in tasks %}
         <tr>
-          <td>{{ task.task_id }}</td>
-          <td><span class="status {{ task.status }}">{{ task.status }}</span></td>
-          <td>{{ task.concert_url }}</td>
-          <td>{{ task.button_text }}</td>
-          <td>
-            {% if task.bot and task.bot.auto_buy_running %}
-              {% if task.bot.auto_buy_paused %}
-              <span class="muted">Auto buy: paused ({{ task.ticket_category or '-' }} x{{ task.ticket_quantity or 1 }})</span>
+          <td class="nowrap mono">#{{ task.task_id }}</td>
+          <td class="nowrap">
+            <span class="status {{ task.status }}" {% if task.error %}title="{{ task.error }}"{% endif %}>{{ task.status }}</span>
+          </td>
+          <td class="truncate" title="{{ task.concert_url }} | {{ task.button_text }}{% if task.debugger_address %} | {{ task.debugger_address }}{% endif %}">
+            {{ task.concert_url }}
+            <span class="muted">• {{ task.button_text }}</span>
+            {% if task.debugger_address %}
+            <span class="muted">• {{ task.debugger_address }}</span>
+            {% endif %}
+          </td>
+          <td class="auto-cell nowrap">
+            {% if task.bot and task.bot.awaiting_auto_buy_selection %}
+              {% if task.bot.widget_categories %}
+              <form class="inline-form" method="post" action="{{ url_for('set_auto_buy', task_id=task.task_id) }}">
+                <select name="ticket_category" required title="Kategori">
+                  {% for name in task.bot.widget_categories %}
+                  <option value="{{ name }}">{{ name }}</option>
+                  {% endfor %}
+                </select>
+                <input class="qty-input" type="number" name="ticket_quantity" min="1" max="6" value="{{ task.ticket_quantity or 1 }}" title="Qty" />
+                <button class="icon-btn btn-start" type="submit" title="Auto-buy">
+                  <svg class="icon"><use href="#icon-check"></use></svg>
+                </button>
+              </form>
               {% else %}
-              <span class="muted">Auto buy: running ({{ task.ticket_category or '-' }} x{{ task.ticket_quantity or 1 }})</span>
+              <span class="muted">Auto: tunggu</span>
               {% endif %}
-            {% elif task.bot and task.bot.awaiting_auto_buy_selection %}
-              <span class="muted">Menunggu pilihan auto-buy</span>
+            {% elif task.bot and task.bot.auto_buy_running %}
+              {% if task.bot.auto_buy_paused %}
+                <form class="inline-form" method="post" action="{{ url_for('set_auto_buy', task_id=task.task_id) }}">
+                  {% if task.bot.widget_categories %}
+                  <select name="ticket_category" required title="Kategori">
+                    {% for name in task.bot.widget_categories %}
+                    <option value="{{ name }}">{{ name }}</option>
+                    {% endfor %}
+                  </select>
+                  {% else %}
+                  <input class="cat-input" type="text" name="ticket_category" placeholder="Kategori" required />
+                  {% endif %}
+                  <input class="qty-input" type="number" name="ticket_quantity" min="1" max="6" value="{{ task.ticket_quantity or 1 }}" title="Qty" />
+                  <button class="icon-btn btn-start" type="submit" title="Update & Resume">
+                    <svg class="icon icon-fill"><use href="#icon-play"></use></svg>
+                  </button>
+                </form>
+              {% else %}
+                <span class="muted">Auto: {{ task.ticket_category or '-' }} x{{ task.ticket_quantity or 1 }}</span>
+                <form class="inline-form" method="post" action="{{ url_for('pause_auto_buy', task_id=task.task_id) }}">
+                  <button class="icon-btn btn-stop" type="submit" title="Pause">
+                    <svg class="icon"><use href="#icon-pause"></use></svg>
+                  </button>
+                </form>
+              {% endif %}
             {% elif task.auto_buy %}
               {% if task.ticket_category %}
-              <span class="muted">Auto buy: {{ task.ticket_category }} x{{ task.ticket_quantity }}</span>
+              <span class="muted">Auto: {{ task.ticket_category }} x{{ task.ticket_quantity }}</span>
               {% else %}
-              <span class="muted">Auto buy: menunggu widget</span>
+              <span class="muted">Auto: tunggu</span>
               {% endif %}
             {% else %}
               <span class="muted">Manual</span>
             {% endif %}
           </td>
-          <td>{{ task.debugger_address or '-' }}</td>
-          <td>{{ task.started_at.strftime('%H:%M:%S') }}</td>
-          <td>{{ task.error or '-' }}</td>
-          <td>
-            {% if task.log_path %}
-            <a href="{{ url_for('view_log', task_id=task.task_id) }}" target="_blank">View</a>
-            {% else %}
-            <span class="muted">-</span>
-            {% endif %}
-          </td>
-          <td>
-            {% if task.status in ['starting', 'running', 'stopping'] %}
-              {% if task.bot and task.bot.awaiting_auto_buy_selection %}
-                {% if task.bot.widget_categories %}
-                <form class="inline-form" method="post" action="{{ url_for('set_auto_buy', task_id=task.task_id) }}">
-                  <select name="ticket_category" required>
-                    {% for name in task.bot.widget_categories %}
-                    <option value="{{ name }}">{{ name }}</option>
-                    {% endfor %}
-                  </select>
-                  <input type="number" name="ticket_quantity" min="1" max="6" value="{{ task.ticket_quantity or 1 }}" />
-                  <button class="btn-start" type="submit">Auto-buy</button>
-                </form>
-                {% else %}
-                <span class="muted">Menunggu kategori widget...</span>
-                {% endif %}
-              {% elif task.bot and task.bot.auto_buy_running %}
-                {% if task.bot.auto_buy_paused %}
-                  <form class="inline-form" method="post" action="{{ url_for('set_auto_buy', task_id=task.task_id) }}">
-                    {% if task.bot.widget_categories %}
-                    <select name="ticket_category" required>
-                      {% for name in task.bot.widget_categories %}
-                      <option value="{{ name }}">{{ name }}</option>
-                      {% endfor %}
-                    </select>
-                    {% else %}
-                    <input type="text" name="ticket_category" placeholder="Nama kategori" required />
-                    {% endif %}
-                    <input type="number" name="ticket_quantity" min="1" max="6" value="{{ task.ticket_quantity or 1 }}" />
-                    <button class="btn-start" type="submit">Update & Resume</button>
-                  </form>
-                  <form method="post" action="{{ url_for('resume_auto_buy', task_id=task.task_id) }}">
-                    <button class="btn-start" type="submit">Resume</button>
-                  </form>
-                {% else %}
-                  <form method="post" action="{{ url_for('pause_auto_buy', task_id=task.task_id) }}">
-                    <button class="btn-stop" type="submit">Pause</button>
-                  </form>
-                {% endif %}
+          <td class="actions-cell nowrap">
+            <div class="action-group">
+              {% if task.log_path %}
+              <a class="icon-btn" href="{{ url_for('view_log', task_id=task.task_id) }}" target="_blank" title="Log">
+                <svg class="icon"><use href="#icon-log"></use></svg>
+              </a>
               {% endif %}
-              <form method="post" action="{{ url_for('stop_bot', task_id=task.task_id) }}">
-                <button class="btn-stop" type="submit">Stop</button>
+              {% if task.debugger_address %}
+              <form class="inline-form" method="post" action="{{ url_for('open_chrome', task_id=task.task_id) }}">
+                <button class="icon-btn btn-chrome" type="submit" title="Chrome">
+                  <svg class="icon"><use href="#icon-browser"></use></svg>
+                </button>
               </form>
-            {% else %}
-            <span class="muted">-</span>
-            {% endif %}
+              {% endif %}
+              {% if task.status in ['starting', 'running', 'stopping'] %}
+              <form class="inline-form" method="post" action="{{ url_for('stop_bot', task_id=task.task_id) }}">
+                <button class="icon-btn btn-stop" type="submit" title="Stop">
+                  <svg class="icon"><use href="#icon-stop"></use></svg>
+                </button>
+              </form>
+              {% else %}
+              <form class="inline-form" method="post" action="{{ url_for('restart_bot', task_id=task.task_id) }}">
+                <button class="icon-btn btn-start" type="submit" title="Restart">
+                  <svg class="icon"><use href="#icon-restart"></use></svg>
+                </button>
+              </form>
+              {% endif %}
+            </div>
           </td>
         </tr>
         {% endfor %}
@@ -400,19 +464,10 @@ PAGE_TEMPLATE = """
       align-items: center;
     }
     .inline-form {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
+      display: inline-flex;
+      gap: 6px;
+      flex-wrap: nowrap;
       align-items: center;
-    }
-    .inline-form select,
-    .inline-form input[type="number"] {
-      margin-bottom: 0;
-      min-width: 140px;
-      flex: 1 1 160px;
-    }
-    .inline-form button {
-      padding: 8px 10px;
     }
     .checkbox {
       display: flex;
@@ -428,14 +483,48 @@ PAGE_TEMPLATE = """
       font-weight: 600;
       cursor: pointer;
     }
+    .icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #0b0f15;
+      color: var(--text);
+      text-decoration: none;
+    }
+    .icon {
+      width: 16px;
+      height: 16px;
+      stroke: currentColor;
+      stroke-width: 2;
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .icon-fill {
+      fill: currentColor;
+      stroke: none;
+    }
     .btn-start {
       background: var(--accent);
+      color: #0b0f15;
+    }
+    .btn-chrome {
+      background: #38bdf8;
       color: #0b0f15;
     }
     .btn-stop {
       background: transparent;
       color: var(--danger);
       border: 1px solid var(--danger);
+    }
+    .icon-btn.btn-start,
+    .icon-btn.btn-chrome {
+      border: none;
     }
     .alert {
       background: rgba(239, 68, 68, 0.1);
@@ -455,7 +544,44 @@ PAGE_TEMPLATE = """
       text-align: left;
       padding: 10px 8px;
       border-bottom: 1px solid var(--border);
-      vertical-align: top;
+      vertical-align: middle;
+    }
+    .table-compact {
+      font-size: 12px;
+    }
+    .table-compact th,
+    .table-compact td {
+      padding: 8px 6px;
+      white-space: nowrap;
+    }
+    .table-compact select,
+    .table-compact input[type="number"],
+    .table-compact input[type="text"] {
+      height: 28px;
+      padding: 4px 8px;
+      font-size: 12px;
+      margin-bottom: 0;
+    }
+    .table-compact select {
+      max-width: 180px;
+    }
+    .qty-input {
+      width: 60px;
+    }
+    .cat-input {
+      width: 140px;
+    }
+    .truncate {
+      max-width: 520px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .nowrap {
+      white-space: nowrap;
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      letter-spacing: 0.2px;
     }
     th { color: var(--muted); font-weight: 600; }
     .status {
@@ -471,6 +597,18 @@ PAGE_TEMPLATE = """
     .status.finished { color: #22c55e; }
     .status.error { color: #f87171; }
     .muted { color: var(--muted); }
+    .action-group {
+      display: inline-flex;
+      flex-wrap: nowrap;
+      gap: 6px;
+      align-items: center;
+    }
+    .action-group form {
+      margin: 0;
+    }
+    .icon-sprite {
+      display: none;
+    }
     pre {
       background: #0b0f15;
       border: 1px solid var(--border);
@@ -481,6 +619,35 @@ PAGE_TEMPLATE = """
   </style>
 </head>
 <body>
+  <svg class="icon-sprite" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="icon-log" viewBox="0 0 24 24">
+      <path d="M6 2h8l4 4v16H6z"></path>
+      <path d="M14 2v6h6"></path>
+      <path d="M8 12h8"></path>
+      <path d="M8 16h8"></path>
+    </symbol>
+    <symbol id="icon-browser" viewBox="0 0 24 24">
+      <rect x="3" y="5" width="18" height="14" rx="2"></rect>
+      <path d="M3 9h18"></path>
+    </symbol>
+    <symbol id="icon-restart" viewBox="0 0 24 24">
+      <path d="M20 12a8 8 0 1 1-2.3-5.7"></path>
+      <path d="M20 4v6h-6"></path>
+    </symbol>
+    <symbol id="icon-stop" viewBox="0 0 24 24">
+      <rect x="7" y="7" width="10" height="10" rx="1"></rect>
+    </symbol>
+    <symbol id="icon-pause" viewBox="0 0 24 24">
+      <path d="M9 6v12"></path>
+      <path d="M15 6v12"></path>
+    </symbol>
+    <symbol id="icon-play" viewBox="0 0 24 24">
+      <path d="M8 6l10 6-10 6z"></path>
+    </symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24">
+      <path d="M5 13l4 4L19 7"></path>
+    </symbol>
+  </svg>
   <div class="wrap">
     <h1>Bot Simple Panel</h1>
     <p>Jalankan beberapa bot dengan sesi Chrome berbeda menggunakan remote debugging.</p>
@@ -531,19 +698,14 @@ PAGE_TEMPLATE = """
     </div>
 
     <h2 style="margin-top: 28px;">Bots</h2>
-    <table>
+    <table class="table-compact">
       <thead>
         <tr>
           <th>ID</th>
           <th>Status</th>
-          <th>URL</th>
-          <th>Button</th>
+          <th>Target</th>
           <th>Auto buy</th>
-          <th>Debugger</th>
-          <th>Started</th>
-          <th>Info</th>
-          <th>Log</th>
-          <th>Action</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody id="tasks-body">{{ table_body|safe }}</tbody>
@@ -693,6 +855,23 @@ def start_bot():
                 if is_active(task.status) and task.debugger_address == debugger_address:
                     return redirect(url_for("index", error="Debugger address sudah dipakai bot lain."))
 
+    if auto_launch:
+        with TASKS_LOCK:
+            exclude_ports = {
+                int(task.debugger_address.split(":")[-1])
+                for task in TASKS.values()
+                if is_active(task.status) and task.debugger_address
+            }
+        port = find_free_port(exclude_ports=exclude_ports)
+        if not port:
+            return redirect(url_for("index", error="Tidak menemukan port kosong untuk Chrome."))
+        _, err = launch_chrome(port, Path(user_data_dir), "about:blank")
+        if err:
+            return redirect(url_for("index", error=f"Gagal buka Chrome: {err}"))
+        if not wait_for_port(port, timeout_seconds=15.0):
+            return redirect(url_for("index", error="Chrome tidak merespon port debugging."))
+        debugger_address = f"127.0.0.1:{port}"
+
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = str(LOG_DIR / f"bot-{task_id}.log")
     task = BotTask(
@@ -795,6 +974,105 @@ def resume_auto_buy(task_id: str):
 
 
 
+@app.post("/chrome/<task_id>")
+def open_chrome(task_id: str):
+    with TASKS_LOCK:
+        task = TASKS.get(task_id)
+    if not task:
+        return redirect(url_for("index", error="Bot tidak ditemukan."))
+    if not task.debugger_address:
+        return redirect(url_for("index", error="Bot ini tidak memakai debugger address."))
+    err = activate_chrome_target(task.debugger_address)
+    if err:
+        return redirect(url_for("index", error=err))
+    return redirect(url_for("index"))
+
+
+@app.post("/restart/<task_id>")
+def restart_bot(task_id: str):
+    with TASKS_LOCK:
+        task = TASKS.get(task_id)
+    if not task:
+        return redirect(url_for("index", error="Bot tidak ditemukan."))
+    if is_active(task.status):
+        return redirect(url_for("index", error="Bot masih berjalan."))
+
+    auto_launch = bool(task.user_data_dir)
+    debugger_address = task.debugger_address
+    open_new_tab = task.open_new_tab
+    close_on_exit = task.close_on_exit
+    concert_url = task.concert_url
+    button_text = task.button_text
+    auto_buy = task.auto_buy
+    ticket_category = task.ticket_category
+    ticket_quantity = task.ticket_quantity
+    user_data_dir = task.user_data_dir or ""
+
+    if auto_launch:
+        reuse_debugger = False
+        port = None
+        if debugger_address:
+            try:
+                port = int(debugger_address.split(":")[-1])
+            except ValueError:
+                port = None
+            if port and wait_for_port(port, timeout_seconds=1.5):
+                reuse_debugger = True
+        if not reuse_debugger:
+            with TASKS_LOCK:
+                exclude_ports = {
+                    int(other.debugger_address.split(":")[-1])
+                    for other in TASKS.values()
+                    if is_active(other.status) and other.debugger_address
+                }
+            port = find_free_port(exclude_ports=exclude_ports)
+            if not port:
+                return redirect(url_for("index", error="Tidak menemukan port kosong untuk Chrome."))
+            _, err = launch_chrome(port, Path(user_data_dir), "about:blank")
+            if err:
+                return redirect(url_for("index", error=f"Gagal buka Chrome: {err}"))
+            if not wait_for_port(port, timeout_seconds=15.0):
+                return redirect(url_for("index", error="Chrome tidak merespon port debugging."))
+            debugger_address = f"127.0.0.1:{port}"
+        open_new_tab = False
+
+    if debugger_address:
+        with TASKS_LOCK:
+            for other in TASKS.values():
+                if other.task_id != task_id and is_active(other.status) and other.debugger_address == debugger_address:
+                    return redirect(url_for("index", error="Debugger address sudah dipakai bot lain."))
+
+    stop_event = Event()
+    bot = SimpleButtonBot(
+        concert_url,
+        button_text,
+        auto_buy=auto_buy,
+        ticket_category=ticket_category or None,
+        ticket_quantity=ticket_quantity,
+        debugger_address=debugger_address or None,
+        open_new_tab=open_new_tab,
+        user_data_dir=user_data_dir or None,
+        stop_event=stop_event,
+        close_on_exit=close_on_exit,
+        interactive=False,
+    )
+    thread = Thread(target=run_bot_task, args=(task,), daemon=True)
+
+    with TASKS_LOCK:
+        task.stop_event = stop_event
+        task.bot = bot
+        task.thread = thread
+        task.status = "starting"
+        task.error = ""
+        task.started_at = datetime.now()
+        task.stopped_at = None
+        task.debugger_address = debugger_address
+        task.open_new_tab = open_new_tab
+
+    thread.start()
+    return redirect(url_for("index"))
+
+
 @app.get("/logs/<task_id>")
 def view_log(task_id: str):
     with TASKS_LOCK:
@@ -818,4 +1096,14 @@ def stop_bot(task_id: str):
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    default_port = 5050 if sys.platform == "darwin" else 5000
+    raw_port = (os.environ.get("PANEL_PORT") or "").strip()
+    port = default_port
+    if raw_port:
+        try:
+            port = int(raw_port)
+        except ValueError:
+            port = default_port
+    if port < 1 or port > 65535:
+        port = default_port
+    app.run(host="127.0.0.1", port=port, debug=False)

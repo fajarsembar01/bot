@@ -16,16 +16,25 @@ else
   exit 1
 fi
 
+PORT="${PANEL_PORT:-}"
+if [ -z "$PORT" ]; then
+  if [ "$(uname)" = "Darwin" ]; then
+    PORT=5050
+  else
+    PORT=5000
+  fi
+fi
+
 $PY -m pip install -q -r requirements.txt
-$PY web_panel.py &
+PANEL_PORT="$PORT" $PY web_panel.py &
 
 sleep 1
 if command -v open >/dev/null 2>&1; then
-  open http://127.0.0.1:5000
+  open http://127.0.0.1:$PORT
 elif command -v xdg-open >/dev/null 2>&1; then
-  xdg-open http://127.0.0.1:5000
+  xdg-open http://127.0.0.1:$PORT
 else
-  echo "Buka browser ke http://127.0.0.1:5000"
+  echo "Buka browser ke http://127.0.0.1:$PORT"
 fi
 
 wait
