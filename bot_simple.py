@@ -19,6 +19,18 @@ from selenium.webdriver.support.ui import Select
 from webdriver_manager.chrome import ChromeDriverManager
 
 
+def is_macos():
+    return sys.platform == "darwin"
+
+
+def is_windows():
+    return sys.platform.startswith("win")
+
+
+def is_linux():
+    return sys.platform.startswith("linux")
+
+
 class SimpleButtonBot:
     def __init__(
         self,
@@ -36,6 +48,7 @@ class SimpleButtonBot:
     ):
         self.concert_url = concert_url
         self.button_text = button_text
+        self.button_text_lower = (button_text or "").strip().lower()
         self.auto_buy = auto_buy
         self.ticket_category = ticket_category
         self.ticket_quantity = ticket_quantity
@@ -57,6 +70,9 @@ class SimpleButtonBot:
         self.widget_ready = False
         self.auto_buy_running = False
         self.auto_buy_paused = False
+        self._cached_buttons = []
+        self.log_every = 5
+        self.auto_buy_log_every = 5
     
     def random_delay(self, min_seconds=0.5, max_seconds=4):
         """Random delay antara min dan max seconds"""
@@ -119,11 +135,13 @@ class SimpleButtonBot:
             chrome_options.add_experimental_option("debuggerAddress", self.debugger_address)
         else:
             # Anti-detection options
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
+            if is_linux():
+                chrome_options.add_argument("--no-sandbox")
+                chrome_options.add_argument("--disable-dev-shm-usage")
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
             chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
             chrome_options.add_experimental_option('useAutomationExtension', False)
+            chrome_options.add_argument("--window-size=1200,800")
             
             # User agent
             chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -207,52 +225,92 @@ class SimpleButtonBot:
                 pass
         return False
 
+    def _xpath_literal(self, text):
+        if "'" not in text:
+            return f"'{text}'"
+        if '"' not in text:
+            return f'"{text}"'
+        parts = text.split("'")
+        return "concat(" + ", \"'\", ".join(f"'{part}'" for part in parts) + ")"
+
+    def _matches_button_text(self, elem):
+        button_text_lower = self.button_text_lower
+        if not button_text_lower:
+            return False
+        try:
+            text = (elem.text or "").strip().lower()
+            if text and (button_text_lower in text or text in button_text_lower):
+                return True
+        except:
+            return False
+
+        try:
+            value = elem.get_attribute('value')
+            if value and button_text_lower in value.lower():
+                return True
+        except:
+            pass
+
+        try:
+            aria_label = elem.get_attribute('aria-label') or ''
+            title = elem.get_attribute('title') or ''
+            if button_text_lower in aria_label.lower() or button_text_lower in title.lower():
+                return True
+        except:
+            pass
+
+        return False
+
     def find_buttons_by_text(self):
         """Cari SEMUA tombol berdasarkan text (bukan hanya satu)"""
         try:
-            # Cari semua button, link, div, span yang bisa diklik
-            elements = self.driver.find_elements(By.XPATH, 
-                "//button | //a | //div[@onclick] | //span[@onclick] | //*[@role='button']")
-            
-            target_buttons = []
-            button_text_lower = self.button_text.lower()
-            
-            for elem in elements:
-                try:
-                    # Skip jika element tidak ada
-                    if not elem:
+            button_text_lower = self.button_text_lower
+            if not button_text_lower:
+                return None
+
+            if self._cached_buttons:
+                cached_hits = []
+                for elem in self._cached_buttons:
+                    try:
+                        if self._matches_button_text(elem):
+                            cached_hits.append(elem)
+                    except:
                         continue
-                    
-                    # Cek text content
-                    text = elem.text.strip().lower()
-                    
-                    # Cek apakah text tombol ada di element
-                    if button_text_lower in text or text in button_text_lower:
-                        if text:  # Hanya tambahkan jika ada text
-                            target_buttons.append(elem)
-                            continue
-                    
-                    # Cek juga di value attribute (untuk input button)
-                    try:
-                        value = elem.get_attribute('value')
-                        if value and button_text_lower in value.lower():
-                            target_buttons.append(elem)
-                            continue
-                    except:
-                        pass
-                    
-                    # Cek juga di aria-label atau title
-                    try:
-                        aria_label = elem.get_attribute('aria-label') or ''
-                        title = elem.get_attribute('title') or ''
-                        if button_text_lower in aria_label.lower() or button_text_lower in title.lower():
-                            target_buttons.append(elem)
-                    except:
-                        pass
-                    
-                except:
-                    continue
+                if cached_hits:
+                    self._cached_buttons = cached_hits
+                    return cached_hits
+                self._cached_buttons = []
+
+            target_buttons = []
+            try:
+                needle = self._xpath_literal(button_text_lower)
+                lower_map = "abcdefghijklmnopqrstuvwxyz"
+                upper_map = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                fast_xpath = (
+                    f"//button[contains(translate(normalize-space(.), '{upper_map}', '{lower_map}'), {needle})] | "
+                    f"//a[contains(translate(normalize-space(.), '{upper_map}', '{lower_map}'), {needle})] | "
+                    f"//*[@role='button'][contains(translate(normalize-space(.), '{upper_map}', '{lower_map}'), {needle})] | "
+                    f"//button[contains(translate(@value, '{upper_map}', '{lower_map}'), {needle})] | "
+                    f"//input[@type='button' or @type='submit'][contains(translate(@value, '{upper_map}', '{lower_map}'), {needle})] | "
+                    f"//*[@onclick][contains(translate(normalize-space(.), '{upper_map}', '{lower_map}'), {needle})] | "
+                    f"//*[@aria-label][contains(translate(@aria-label, '{upper_map}', '{lower_map}'), {needle})] | "
+                    f"//*[@title][contains(translate(@title, '{upper_map}', '{lower_map}'), {needle})]"
+                )
+                fast_candidates = self.driver.find_elements(By.XPATH, fast_xpath)
+                for elem in fast_candidates:
+                    if self._matches_button_text(elem):
+                        target_buttons.append(elem)
+            except:
+                target_buttons = []
+
+            if not target_buttons:
+                elements = self.driver.find_elements(By.XPATH, 
+                    "//button | //a | //div[@onclick] | //span[@onclick] | //*[@role='button']")
+                for elem in elements:
+                    if self._matches_button_text(elem):
+                        target_buttons.append(elem)
             
+            self._cached_buttons = target_buttons
             return target_buttons if target_buttons else None
             
         except Exception as e:
@@ -488,6 +546,7 @@ class SimpleButtonBot:
             
             refresh_count = 0
             last_status = None
+            last_button_count = None
             
             # Simpan URL awal untuk referensi
             initial_url = self.driver.current_url
@@ -522,14 +581,17 @@ class SimpleButtonBot:
                             self.monitor_after_click()
                             break
                     
-                    print(f"[{current_time}] #{refresh_count} mencari...", end='\r')
+                    if refresh_count % self.log_every == 0:
+                        print(f"[{current_time}] #{refresh_count} mencari...", end='\r')
                     
                     # Cari SEMUA tombol dengan text yang sama
                     buttons = self.find_buttons_by_text()
                     
                     if buttons and len(buttons) > 0:
                         count = len(buttons)
-                        print(f"\n✅ Ditemukan {count} tombol")
+                        if count != last_button_count:
+                            print(f"\n✅ Ditemukan {count} tombol")
+                            last_button_count = count
                         success = False
                         
                         # COBA SEMUA TOMBOL sampai salah satunya benar-benar berhasil
@@ -590,6 +652,8 @@ class SimpleButtonBot:
                         # Tombol tidak ditemukan
                         if last_status is not None:
                             last_status = None
+                        if last_button_count is not None:
+                            last_button_count = None
 
                     current_url = self.driver.current_url
                     if self._is_widget_url(current_url):
@@ -815,7 +879,8 @@ class SimpleButtonBot:
                 attempt += 1
                 current_time = datetime.now().strftime('%H:%M:%S')
 
-                print(f"[{current_time}] Attempt #{attempt}", end='\r')
+                if attempt % self.auto_buy_log_every == 0:
+                    print(f"[{current_time}] Attempt #{attempt}", end='\r')
 
                 try:
                     # Refresh halaman
@@ -869,7 +934,7 @@ class SimpleButtonBot:
             pass
         return False
 
-    def _collect_ticket_categories(self):
+    def _collect_ticket_categories(self, allow_cached=True):
         """Ambil daftar kategori tiket yang tersedia dari widget"""
         categories = []
         seen = set()
@@ -914,6 +979,10 @@ class SimpleButtonBot:
         except:
             pass
 
+        if categories:
+            return categories
+        if allow_cached and self.widget_categories:
+            return list(self.widget_categories)
         return categories
     
     def _dispatch_input_change(self, element):
@@ -1142,7 +1211,7 @@ class SimpleButtonBot:
         """Klik tombol Agree pada popup (jika muncul)"""
         end_time = time.time() + timeout_seconds
         
-        while time.time() < end_time:
+        def attempt_click():
             try:
                 agree_btn = self.driver.find_element(By.ID, "btn-agree-tnc")
                 if agree_btn and agree_btn.is_displayed():
@@ -1160,7 +1229,7 @@ class SimpleButtonBot:
                     return True
             except:
                 pass
-            
+
             try:
                 agree_buttons = self.driver.find_elements(
                     By.XPATH,
@@ -1187,7 +1256,31 @@ class SimpleButtonBot:
                     return True
             except:
                 pass
-            
+            return False
+
+        while time.time() < end_time:
+            if attempt_click():
+                return True
+
+            try:
+                iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+            except:
+                iframes = []
+            for iframe in iframes:
+                try:
+                    self.driver.switch_to.frame(iframe)
+                except:
+                    continue
+                try:
+                    if attempt_click():
+                        self.driver.switch_to.default_content()
+                        return True
+                finally:
+                    try:
+                        self.driver.switch_to.default_content()
+                    except:
+                        pass
+
             self.random_delay(0.2, 0.5)
         
         return False
@@ -1394,7 +1487,7 @@ class SimpleButtonBot:
                         self.random_delay(0.6, 1.6)
                         
                         # Jika muncul popup T&C, langsung klik Agree
-                        self._click_agree_popup(timeout_seconds=8)
+                        agree_clicked = self._click_agree_popup(timeout_seconds=8)
                         
                         # Cek apakah berhasil (halaman checkout/personal information muncul)
                         self.random_delay(0.4, 0.9)
@@ -1406,8 +1499,10 @@ class SimpleButtonBot:
                         current_url = self.driver.current_url
                         if 'checkout' in current_url.lower() or 'personal' in current_url.lower():
                             return True
-                        
-                        return True
+
+                        if agree_clicked:
+                            return False
+                        return False
                     else:
                         return False
                 else:

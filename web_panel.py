@@ -21,6 +21,18 @@ from bot_simple import SimpleButtonBot
 app = Flask(__name__)
 
 LOG_DIR = Path(__file__).parent / "logs"
+DEFAULT_WINDOW_SIZE = "1200,800"
+
+def is_macos() -> bool:
+    return sys.platform == "darwin"
+
+
+def is_windows() -> bool:
+    return sys.platform.startswith("win")
+
+
+def is_linux() -> bool:
+    return sys.platform.startswith("linux")
 
 
 class ThreadOutputRouter:
@@ -79,18 +91,23 @@ def find_chrome_path() -> str:
     if env_path:
         candidates.append(env_path)
 
-    if sys.platform == "darwin":
+    if is_macos():
         candidates.extend([
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             "/Applications/Chromium.app/Contents/MacOS/Chromium",
         ])
-    elif sys.platform.startswith("linux"):
+    elif is_linux():
         candidates.extend([
             "/usr/bin/google-chrome",
             "/usr/bin/google-chrome-stable",
             "/usr/bin/chromium",
             "/usr/bin/chromium-browser",
         ])
+    elif is_windows():
+        for key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            base = os.environ.get(key, "")
+            if base:
+                candidates.append(os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"))
     else:
         for key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
             base = os.environ.get(key, "")
@@ -156,10 +173,11 @@ def launch_chrome(port: Optional[int], profile_dir: Path, start_url: str):
         f"--user-data-dir={str(profile_dir)}",
         "--no-first-run",
         "--no-default-browser-check",
+        f"--window-size={DEFAULT_WINDOW_SIZE}",
         "--new-window",
         start_url,
     ])
-    if sys.platform == "darwin" and ".app/Contents/MacOS/" in chrome_path:
+    if is_macos() and ".app/Contents/MacOS/" in chrome_path:
         app_path = chrome_path.split(".app/Contents/MacOS/")[0] + ".app"
         cmd = ["open", "-g", "-n", "-a", app_path, "--args", *args]
     else:
@@ -1096,7 +1114,7 @@ def stop_bot(task_id: str):
 
 
 if __name__ == "__main__":
-    default_port = 5050 if sys.platform == "darwin" else 5000
+    default_port = 5050 if is_macos() else 5000
     raw_port = (os.environ.get("PANEL_PORT") or "").strip()
     port = default_port
     if raw_port:
