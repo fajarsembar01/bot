@@ -8,13 +8,14 @@ import os
 import sys
 import random
 import re
+import shutil
 from datetime import datetime
-from threading import Event
+from threading import Event, Thread
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import WebDriverException, TimeoutException
+from selenium.common.exceptions import WebDriverException, TimeoutException, StaleElementReferenceException
 from selenium.webdriver.support.ui import Select
 from webdriver_manager.chrome import ChromeDriverManager
 
@@ -44,6 +45,10 @@ class SimpleButtonBot:
         user_data_dir=None,
         stop_event=None,
         close_on_exit=None,
+        aggressive_order=False,
+        aggressive_click=False,
+        skip_refresh=False,
+        auto_detect_widget=False,
         interactive=True,
     ):
         self.concert_url = concert_url
@@ -60,6 +65,11 @@ class SimpleButtonBot:
         self.user_data_dir = user_data_dir
         self.stop_event = stop_event
         self.close_on_exit = close_on_exit
+        self.aggressive_order = aggressive_order
+        self.aggressive_click = aggressive_click
+        self.skip_refresh = skip_refresh
+        self.skip_refresh_max_attempts = 5
+        self.auto_detect_widget = auto_detect_widget
         self.interactive = interactive
         self.setup_success = False
         self.last_error = ""
@@ -152,27 +162,65 @@ class SimpleButtonBot:
             driver_errors = []
             driver = None
 
+            def init_with_timeout(label, fn, timeout_seconds=45):
+                result = {"driver": None, "error": None}
+
+                def runner():
+                    try:
+                        result["driver"] = fn()
+                    except Exception as exc:
+                        result["error"] = exc
+
+                thread = Thread(target=runner, daemon=True)
+                thread.start()
+                thread.join(timeout_seconds)
+                if thread.is_alive():
+                    return None, f"{label} timeout after {timeout_seconds}s"
+                if result["driver"] is None and result["error"]:
+                    return None, f"{label} failed: {result['error']}"
+                return result["driver"], ""
+
             chromedriver_path = os.environ.get("CHROMEDRIVER_PATH", "").strip()
             if chromedriver_path:
-                try:
-                    service = Service(chromedriver_path)
-                    driver = webdriver.Chrome(service=service, options=chrome_options)
-                except Exception as e:
-                    driver_errors.append(f"CHROMEDRIVER_PATH failed: {e}")
+                service = Service(chromedriver_path)
+                print("Driver: CHROMEDRIVER_PATH...")
+                driver, err = init_with_timeout(
+                    "CHROMEDRIVER_PATH",
+                    lambda: webdriver.Chrome(service=service, options=chrome_options),
+                )
+                if err:
+                    driver_errors.append(err)
 
             if not driver:
-                try:
-                    # Prefer Selenium Manager (auto-detect driver per OS/arch)
-                    driver = webdriver.Chrome(options=chrome_options)
-                except Exception as e:
-                    driver_errors.append(f"Selenium Manager failed: {e}")
+                path_driver = shutil.which("chromedriver") or shutil.which("chromedriver.exe")
+                if path_driver:
+                    service = Service(path_driver)
+                    print("Driver: chromedriver (PATH)...")
+                    driver, err = init_with_timeout(
+                        "chromedriver (PATH)",
+                        lambda: webdriver.Chrome(service=service, options=chrome_options),
+                    )
+                    if err:
+                        driver_errors.append(err)
 
             if not driver:
-                try:
+                print("Driver: webdriver-manager...")
+                def create_manager_driver():
                     service = Service(ChromeDriverManager().install())
-                    driver = webdriver.Chrome(service=service, options=chrome_options)
-                except Exception as e:
-                    driver_errors.append(f"webdriver-manager failed: {e}")
+                    return webdriver.Chrome(service=service, options=chrome_options)
+
+                driver, err = init_with_timeout("webdriver-manager", create_manager_driver)
+                if err:
+                    driver_errors.append(err)
+
+            if not driver:
+                print("Driver: Selenium Manager...")
+                driver, err = init_with_timeout(
+                    "Selenium Manager",
+                    lambda: webdriver.Chrome(options=chrome_options),
+                )
+                if err:
+                    driver_errors.append(err)
 
             if not driver:
                 raise Exception(" | ".join(driver_errors) or "Driver init failed")
@@ -180,6 +228,10 @@ class SimpleButtonBot:
             self.driver = driver
             if not self.debugger_address:
                 self.driver.maximize_window()
+            try:
+                self.driver.set_page_load_timeout(30)
+            except:
+                pass
             
             # Anti-detection script
             try:
@@ -355,6 +407,8 @@ class SimpleButtonBot:
             
             return 'enabled'
             
+        except StaleElementReferenceException:
+            return 'stale'
         except Exception as e:
             print(f"⚠️ Error checking button status: {e}")
             return 'unknown'
@@ -366,6 +420,22 @@ class SimpleButtonBot:
             url_before = self.driver.current_url
             title_before = self.driver.title
             
+            if self.aggressive_click:
+                try:
+                    button.click()
+                    self.random_delay(0.6, 1.6)
+                    if self._check_click_success_strict(url_before, title_before):
+                        return True
+                except:
+                    pass
+                try:
+                    self.driver.execute_script("arguments[0].click();", button)
+                    self.random_delay(0.6, 1.6)
+                    if self._check_click_success_strict(url_before, title_before):
+                        return True
+                except:
+                    pass
+
             # Scroll ke button (coba beberapa cara untuk hidden button)
             try:
                 self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", button)
@@ -541,7 +611,14 @@ class SimpleButtonBot:
         
         try:
             print("🌐 Open page...")
-            self.driver.get(self.concert_url)
+            try:
+                self.driver.get(self.concert_url)
+            except TimeoutException:
+                try:
+                    self.driver.execute_script("window.stop();")
+                except:
+                    pass
+                print("⚠️ Page load timeout, lanjut proses.")
             self.random_delay(0.6, 1.5)
             
             refresh_count = 0
@@ -564,6 +641,23 @@ class SimpleButtonBot:
                         self._handle_widget_page(current_url)
                         self.monitor_after_click()
                         break
+
+                    if self.auto_detect_widget:
+                        widget_url = self._find_widget_url_fast()
+                        if widget_url and not self._is_widget_url(current_url):
+                            print(f"\n⚡ Widget URL ditemukan: {widget_url}")
+                            try:
+                                self.driver.get(widget_url)
+                            except TimeoutException:
+                                try:
+                                    self.driver.execute_script("window.stop();")
+                                except:
+                                    pass
+                            self.random_delay(0.4, 0.9)
+                            if self._is_widget_url(self.driver.current_url):
+                                self._handle_widget_page(self.driver.current_url)
+                                self.monitor_after_click()
+                                break
                     
                     # CEK DULU: Apakah URL sudah berubah dari URL awal?
                     url_before_check = current_url.split('#')[0].split('?')[0].strip().rstrip('/')
@@ -863,6 +957,7 @@ class SimpleButtonBot:
         max_attempts = 1000  # Loop sampai berhasil
         self.auto_buy_running = True
         self.auto_buy_paused = False
+        skip_refresh_attempts = 0
 
         try:
             while attempt < max_attempts:
@@ -883,10 +978,22 @@ class SimpleButtonBot:
                     print(f"[{current_time}] Attempt #{attempt}", end='\r')
 
                 try:
-                    # Refresh halaman
-                    self.driver.refresh()
-                    self._click_privacy_popup(timeout_seconds=2)
-                    self.random_delay(self.loop_delay_min, self.loop_delay_max)
+                    if not self.skip_refresh:
+                        # Refresh halaman
+                        self.driver.refresh()
+                        self._click_privacy_popup(timeout_seconds=2)
+                        self.random_delay(self.loop_delay_min, self.loop_delay_max)
+                    else:
+                        # Hybrid: tanpa refresh dulu, tapi sesekali refresh untuk update DOM
+                        skip_refresh_attempts += 1
+                        if skip_refresh_attempts >= self.skip_refresh_max_attempts:
+                            self.driver.refresh()
+                            self._click_privacy_popup(timeout_seconds=2)
+                            self.random_delay(self.loop_delay_min, self.loop_delay_max)
+                            skip_refresh_attempts = 0
+                        else:
+                            self._click_privacy_popup(timeout_seconds=1)
+                            self.random_delay(self.loop_delay_min, self.loop_delay_max)
                     if self.auto_buy_paused:
                         continue
 
@@ -1014,6 +1121,50 @@ class SimpleButtonBot:
             return False
         url_lower = url.lower()
         return "widget.loket.com/widget" in url_lower or "loket.com/widget" in url_lower
+
+    def _is_order_complete_url(self, url):
+        if not url:
+            return False
+        return "/register" in url.lower()
+
+    def _normalize_widget_url(self, raw):
+        raw = (raw or "").strip().strip("'\"")
+        if not raw:
+            return ""
+        if raw.startswith("//"):
+            raw = "https:" + raw
+        if raw.startswith("widget.loket.com") or raw.startswith("loket.com/widget"):
+            raw = "https://" + raw
+        return raw
+
+    def _find_widget_url_fast(self):
+        """Cari URL widget langsung dari DOM/HTML tanpa klik tombol."""
+        try:
+            url = self.driver.execute_script(
+                """
+                try {
+                  const link = document.querySelector('a[href*="loket.com/widget"]');
+                  if (link && link.href) return link.href;
+                  const dataEl = document.querySelector('[data-url*="loket.com/widget"],[data-href*="loket.com/widget"],[data-link*="loket.com/widget"]');
+                  if (dataEl) return dataEl.getAttribute('data-url') || dataEl.getAttribute('data-href') || dataEl.getAttribute('data-link') || '';
+                  const html = document.documentElement ? document.documentElement.outerHTML : '';
+                  let match = html.match(/https?:\\/\\/(?:widget\\.)?loket\\.com\\/widget\\/[A-Za-z0-9_-]+/i);
+                  if (!match) {
+                    match = html.match(/(?:widget\\.)?loket\\.com\\/widget\\/[A-Za-z0-9_-]+/i);
+                  }
+                  return match ? match[0] : '';
+                } catch (e) {
+                  return '';
+                }
+                """
+            )
+        except Exception:
+            url = ""
+
+        url = self._normalize_widget_url(url)
+        if url and self._is_widget_url(url):
+            return url
+        return ""
 
     def _handle_widget_page(self, current_url):
         """Handle widget page actions such as privacy popup and auto-buy."""
@@ -1444,7 +1595,7 @@ class SimpleButtonBot:
             except Exception as e:
                 print(f"   ⚠️ Error setting quantity: {e}")
             
-            if not quantity_set:
+            if not quantity_set and not self.aggressive_order:
                 return False
             
             # Cari dan klik tombol Order Now
@@ -1489,15 +1640,10 @@ class SimpleButtonBot:
                         # Jika muncul popup T&C, langsung klik Agree
                         agree_clicked = self._click_agree_popup(timeout_seconds=8)
                         
-                        # Cek apakah berhasil (halaman checkout/personal information muncul)
+                        # Cek apakah sudah masuk step register (order sukses)
                         self.random_delay(0.4, 0.9)
-                        page_source = self.driver.page_source.lower()
-                        if any(keyword in page_source for keyword in ['personal information', 'confirmation', 'checkout', 'select category']):
-                            return True
-                        
-                        # Cek apakah URL berubah
                         current_url = self.driver.current_url
-                        if 'checkout' in current_url.lower() or 'personal' in current_url.lower():
+                        if self._is_order_complete_url(current_url):
                             return True
 
                         if agree_clicked:

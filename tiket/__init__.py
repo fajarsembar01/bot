@@ -1,0 +1,1 @@
+"""Tiket.com bot package."""

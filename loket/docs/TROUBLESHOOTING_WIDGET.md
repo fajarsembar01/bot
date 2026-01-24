@@ -7,7 +7,7 @@
 Jika Anda sudah tahu URL widget Loket (contoh: `https://widget.loket.com/widget/yqar4pcjnnmn6q9mxobc`), gunakan langsung:
 
 ```bash
-python3 bot_loket.py --widget https://widget.loket.com/widget/yqar4pcjnnmn6q9mxobc
+python3 loket/bot_loket.py --widget https://widget.loket.com/widget/yqar4pcjnnmn6q9mxobc
 ```
 
 **Cara mendapatkan URL widget:**
@@ -48,7 +48,7 @@ Pastikan Anda menggunakan versi terbaru bot.
 
 1. Jalankan bot dengan mode browser terlihat:
    ```bash
-   python3 bot_loket.py --no-headless
+   python3 loket/bot_loket.py --no-headless
    ```
 
 2. Bot akan membuka browser, lihat apakah halaman sudah terbuka dengan benar
@@ -74,7 +74,7 @@ Widget Loket biasanya hanya muncul:
 
 Untuk melihat lebih detail apa yang bot temukan:
 
-1. Edit file `bot_loket.py`, tambahkan print statement lebih banyak
+1. Edit file `loket/bot_loket.py`, tambahkan print statement lebih banyak
 2. Atau jalankan dengan Python debugger
 3. Periksa screenshot yang diambil bot (file `screenshot_*.png`)
 
@@ -112,4 +112,3 @@ Jika masih tidak bisa, coba:
 ---
 
 **Tips**: Cara terbaik adalah mendapatkan URL widget terlebih dahulu secara manual, lalu gunakan parameter `--widget` untuk langsung masuk ke widget Loket.
-

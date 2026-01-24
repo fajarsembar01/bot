@@ -18,30 +18,30 @@ Bot sudah dikonfigurasi untuk **ateezinjakarta.com** secara default.
 Jika ingin ganti URL, edit file `.env` atau langsung pakai parameter:
 
 ```bash
-python3 bot_loket.py --url https://loket.com/event/your-event
+python3 loket/bot_loket.py --url https://loket.com/event/your-event
 ```
 
 **Untuk membuat file .env:**
 ```bash
-cp env_template.txt .env
-# Lalu edit file .env sesuai kebutuhan
+cp loket/env_template.txt loket/.env
+# Lalu edit file loket/.env sesuai kebutuhan
 ```
 
 ## Langkah 3: Jalankan Bot
 
 ### Cara Paling Mudah:
 ```bash
-python3 bot_loket.py
+python3 loket/bot_loket.py
 ```
 
 ### Dengan Custom URL:
 ```bash
-python3 bot_loket.py --url https://ateezinjakarta.com/
+python3 loket/bot_loket.py --url https://ateezinjakarta.com/
 ```
 
 ### Dengan Widget URL Langsung (Jika sudah tahu URL widget Loket):
 ```bash
-python3 bot_loket.py --widget https://widget.loket.com/widget/yqar4pcjnnmn6q9mxobc
+python3 loket/bot_loket.py --widget https://widget.loket.com/widget/yqar4pcjnnmn6q9mxobc
 ```
 
 **Cara mendapatkan URL widget:**
@@ -52,13 +52,13 @@ python3 bot_loket.py --widget https://widget.loket.com/widget/yqar4pcjnnmn6q9mxo
 
 ### Mode Headless (Browser tidak terlihat):
 ```bash
-python3 bot_loket.py --headless
+python3 loket/bot_loket.py --headless
 ```
 
 ### Atau pakai script helper:
 ```bash
-chmod +x run.sh
-./run.sh
+chmod +x loket/run.sh
+./loket/run.sh
 ```
 
 ## Langkah 4: Ikuti Instruksi di Terminal
@@ -104,7 +104,7 @@ python3 -m pip install -r requirements.txt
 ### Bot tidak menemukan tombol waiting room / link ke widget Loket
 - **Solusi 1**: Gunakan URL widget langsung
   ```bash
-  python3 bot_loket.py --widget https://widget.loket.com/widget/xxxxx
+  python3 loket/bot_loket.py --widget https://widget.loket.com/widget/xxxxx
   ```
   Untuk mendapatkan URL widget:
   - Buka halaman konser di browser
@@ -123,20 +123,20 @@ python3 -m pip install -r requirements.txt
 ## Contoh Penggunaan Lengkap:
 
 ```bash
-# 1. Masuk ke folder bot
-cd /Users/ainunfajar/botantrian
+# 1. Masuk ke folder repo
+cd /path/to/repo
 
 # 2. Install dependencies (hanya sekali)
 pip install -r requirements.txt
 
 # 3. Jalankan bot
-python3 bot_loket.py
+python3 loket/bot_loket.py
 
 # 4. Jika perlu custom URL:
-python3 bot_loket.py --url https://loket.com/event/konser-xyz
+python3 loket/bot_loket.py --url https://loket.com/event/konser-xyz
 
 # 5. Atau langsung pakai widget URL (jika sudah tahu):
-python3 bot_loket.py --widget https://widget.loket.com/widget/yqar4pcjnnmn6q9mxobc
+python3 loket/bot_loket.py --widget https://widget.loket.com/widget/yqar4pcjnnmn6q9mxobc
 ```
 
 ## Catatan Penting:
@@ -148,4 +148,3 @@ python3 bot_loket.py --widget https://widget.loket.com/widget/yqar4pcjnnmn6q9mxo
 ---
 
 **Selamat mencoba! Semoga dapat tiketnya! 🎫✨**
-

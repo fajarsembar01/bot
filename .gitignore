@@ -30,4 +30,8 @@ chromedriver
 geckodriver
 chrome_profiles/
 logs/
-
+loket/chrome_profiles/
+loket/logs/
+tiket/logs/
+ticketmaster/logs/
+ticketmaster/sessions/

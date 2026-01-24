@@ -1,32 +1,37 @@
-# 🤖 Bot Antrian Loket.com
+# 🤖 Bot Loket.com + Tiket.com + Ticketmaster
 
-Bot otomatis untuk membantu mendapatkan antrian awal di Loket.com dengan sistem LOKET Antrean.
+Bot otomatis untuk Loket.com (waiting room/antrian), Tiket.com (auto-buy paket), dan Ticketmaster (simple auto-click).
 
-## 📦 Ada 2 Bot Tersedia
+## 📦 Bot Tersedia
 
-### 1. **bot_simple.py** ⭐ RECOMMENDED (Lebih Mudah)
+### 1. **loket/bot_simple.py** ⭐ RECOMMENDED (Lebih Mudah)
 - Bot sederhana dan mudah digunakan
 - Refresh halaman setiap 3 detik
 - Mencari tombol berdasarkan text yang Anda masukkan
 - Input parameter saat running (link konser + text tombol)
 - **Cocok untuk pemula!**
 
-📖 **Lihat panduan**: [CARA_PAKAI_SIMPLE.md](CARA_PAKAI_SIMPLE.md)
+📖 **Lihat panduan**: [loket/docs/CARA_PAKAI_SIMPLE.md](loket/docs/CARA_PAKAI_SIMPLE.md)
 
-### 2. **bot_loket.py** (Advanced)
+### 2. **loket/bot_loket.py** (Advanced)
 - Bot dengan fitur lengkap
 - Auto-detect widget Loket
 - Support multiple method detection
 - Konfigurasi via file `.env`
 
-📖 **Lihat panduan**: [CARA_PAKAI.md](CARA_PAKAI.md)
+📖 **Lihat panduan**: [loket/docs/CARA_PAKAI.md](loket/docs/CARA_PAKAI.md)
 
-## ⚠️ PENTING
+### 3. **tiket/bot_tiket.py** (Tiket.com Auto-buy - Beta)
+- Auto pilih paket berdasarkan nama
+- Auto set quantity dan lanjut ke checkout
+- Cocok untuk halaman packages Tiket.com
 
-- Bot ini adalah alat bantu untuk otomatisasi proses yang dapat dilakukan secara manual
-- Gunakan dengan bijak dan bertanggung jawab
-- Pastikan Anda mematuhi Terms of Service Loket.com
-- Bot ini hanya membantu memasuki waiting room, pembelian tiket tetap harus dilakukan manual
+### 4. **ticketmaster/bot_ticketmaster.py** (Ticketmaster Simple)
+- Refresh halaman dan cari tombol berdasarkan text
+- Bisa auto-click + auto-buy sederhana (quantity + checkout)
+- Support session baru (profil terpisah) di tab baru
+
+
 
 ## 📋 Persyaratan
 
@@ -44,16 +49,28 @@ pip install -r requirements.txt
 ```
 
 3. **Setup environment variables:**
+
+Loket:
 ```bash
-cp .env.example .env
+cp loket/env_template.txt loket/.env
 ```
 
-Edit file `.env` dan sesuaikan dengan kebutuhan:
-```env
-CONCERT_URL=https://ateezinjakarta.com/
-HEADLESS=False
-WAIT_TIME=5
+Tiket.com:
+```bash
+cp tiket/env_template.txt tiket/.env
 ```
+
+Ticketmaster:
+```bash
+cp ticketmaster/env_template.txt ticketmaster/.env
+```
+
+## 🗂️ Struktur Project
+
+- `loket/` - bot Loket.com (simple + advanced + panel)
+- `loket/docs/` - panduan Loket.com
+- `tiket/` - bot Tiket.com (auto-buy + panel)
+- `ticketmaster/` - bot Ticketmaster (monitoring helper)
 
 ## 💻 Quick Start (Bot Sederhana - RECOMMENDED)
 
@@ -62,7 +79,7 @@ WAIT_TIME=5
 pip install -r requirements.txt
 
 # 2. Jalankan bot sederhana
-python3 bot_simple.py
+python3 loket/bot_simple.py
 
 # 3. Input parameter:
 #    - Link konser: https://ateezinjakarta.com/
@@ -75,8 +92,49 @@ Bot akan:
 - ✅ Memberi notifikasi jika tombol ditemukan (enabled/disabled)
 - ✅ Otomatis klik jika tombol sudah enabled
 
-**📖 Panduan lengkap**: Lihat [CARA_PAKAI_SIMPLE.md](CARA_PAKAI_SIMPLE.md)
+**📖 Panduan lengkap**: Lihat [loket/docs/CARA_PAKAI_SIMPLE.md](loket/docs/CARA_PAKAI_SIMPLE.md)
 
+## 💻 Quick Start (Tiket.com Auto-buy)
+
+```bash
+# Contoh auto-buy paket
+python3 tiket/bot_tiket.py \\
+  --url "https://www.tiket.com/id-id/to-do/one-ok-rock-detox-tour-2026/packages" \\
+  --package "CAT 1" \\
+  --quantity 2
+```
+
+Jika muncul challenge/login, selesaikan manual di browser, lalu lanjutkan bot.
+
+Script helper:
+- macOS/Linux: `./tiket/run_tiket.sh`
+- Windows: `tiket\\run_tiket.bat`
+
+## 💻 Quick Start (Ticketmaster Simple)
+
+```bash
+python3 ticketmaster/bot_ticketmaster.py \\
+  --url "https://ticketmaster.sg/ticket/area/26sg_ateez/2978" \\
+  --button "Buy"
+```
+
+Script helper:
+- macOS/Linux: `./ticketmaster/run_ticketmaster.sh`
+- Windows: `ticketmaster\\run_ticketmaster.bat`
+
+## Web Panel Ticketmaster
+
+macOS/Linux:
+```bash
+./ticketmaster/run_panel_ticketmaster.sh
+```
+
+Windows:
+```cmd
+ticketmaster\\run_panel_ticketmaster.bat
+```
+
+Default port: `http://127.0.0.1:5002` (override with `PANEL_TICKETMASTER_PORT`).
 
 ## Web Panel (Recommended untuk Staff)
 
@@ -84,41 +142,58 @@ Panel web memudahkan staff menjalankan bot tanpa perlu input di terminal.
 
 Windows:
 ```bash
-run_panel.bat
+loket\\run_panel.bat
 ```
 
 macOS/Linux:
 ```bash
-chmod +x run_panel.sh
-./run_panel.sh
+chmod +x loket/run_panel.sh
+./loket/run_panel.sh
 ```
 
 Setelah panel jalan, buka `http://127.0.0.1:5000`, isi URL + button text, lalu klik **Start Bot**.
 
 Jika Chrome tidak ditemukan, set environment `CHROME_PATH` ke lokasi Chrome/Chromium Anda.
 
-## 💻 Cara Menggunakan Bot Advanced (bot_loket.py)
+## Web Panel Tiket.com (Separate)
+
+Panel Tiket.com dipisah karena flow dan struktur halaman berbeda.
+
+Windows:
+```bash
+tiket\\run_panel_tiket.bat
+```
+
+macOS/Linux:
+```bash
+chmod +x tiket/run_panel_tiket.sh
+./tiket/run_panel_tiket.sh
+```
+
+Default port: `http://127.0.0.1:5001` (macOS gunakan 5051). Bisa override lewat `PANEL_TIKET_PORT`.
+
+## 💻 Cara Menggunakan Bot Advanced (loket/bot_loket.py)
 
 ### Cara 1: Basic Usage
 ```bash
-python bot_loket.py
+python loket/bot_loket.py
 ```
 
 Bot akan menggunakan URL dari file `.env` (default: ateezinjakarta.com)
 
 ### Cara 2: Custom URL
 ```bash
-python bot_loket.py --url https://ateezinjakarta.com/
+python loket/bot_loket.py --url https://ateezinjakarta.com/
 ```
 
 ### Cara 3: Headless Mode (browser tidak terlihat)
 ```bash
-python bot_loket.py --headless
+python loket/bot_loket.py --headless
 ```
 
 ### Cara 4: Browser Terlihat (explicit)
 ```bash
-python bot_loket.py --no-headless
+python loket/bot_loket.py --no-headless
 ```
 
 ## 📝 Langkah-langkah Penggunaan
@@ -130,7 +205,7 @@ python bot_loket.py --no-headless
 
 2. **Jalankan Bot:**
    ```bash
-   python bot_loket.py
+   python loket/bot_loket.py
    ```
 
 3. **Jika Perlu Login:**
@@ -174,12 +249,37 @@ python bot_loket.py --no-headless
 
 ## ⚙️ Konfigurasi
 
-File `config.py` berisi konfigurasi default. Anda juga bisa menggunakan file `.env`:
+Loket config ada di `loket/config.py`, Tiket config ada di `tiket/config.py`, Ticketmaster config ada di `ticketmaster/config.py`.
+Anda juga bisa menggunakan file `.env` di masing-masing folder:
 
+Loket:
 - `CONCERT_URL`: URL konser yang ingin dibeli
 - `HEADLESS`: True/False untuk mode headless
 - `WAIT_TIME`: Waktu tunggu sebelum refresh (detik)
 - `START_MONITORING_TIME`: Waktu mulai monitoring (format: HH:MM)
+- File: `loket/.env`
+
+Tiket.com:
+- `TIKET_URL`: URL packages Tiket.com
+- `TIKET_PACKAGE`: Nama paket (partial match)
+- `TIKET_QUANTITY`: Jumlah tiket
+- `TIKET_HEADLESS`: True/False untuk mode headless
+- `TIKET_REFRESH_SECONDS`: Interval refresh
+- `TIKET_MAX_ATTEMPTS`: Batas percobaan
+- File: `tiket/.env`
+
+Ticketmaster:
+- `TICKETMASTER_URL`: URL event Ticketmaster
+- `TICKETMASTER_BUTTON_TEXT`: Text tombol yang dicari
+- `TICKETMASTER_AUTO_BUY`: True/False untuk auto-buy sederhana
+- `TICKETMASTER_QUANTITY`: Jumlah tiket
+- `TICKETMASTER_HEADLESS`: True/False untuk mode headless
+- `TICKETMASTER_REFRESH_SECONDS`: Interval refresh
+- `TICKETMASTER_MAX_ATTEMPTS`: Batas percobaan
+- `TICKETMASTER_OPEN_NEW_TAB`: Buka target di tab baru
+- `TICKETMASTER_NEW_SESSION`: Gunakan profil Chrome baru
+- `TICKETMASTER_USER_DATA_DIR`: Profil custom (opsional)
+- File: `ticketmaster/.env`
 
 ## 🔧 Troubleshooting
 
@@ -212,7 +312,7 @@ Bot akan otomatis mengambil screenshot setiap 30 detik untuk monitoring. Screens
 - Bot ini dibuat untuk tujuan edukasi dan membantu proses yang legal
 - Penggunaan bot adalah tanggung jawab pengguna
 - Developer tidak bertanggung jawab atas segala konsekuensi penggunaan bot ini
-- Pastikan mematuhi Terms of Service dari Loket.com
+- Pastikan mematuhi Terms of Service dari Loket.com, Tiket.com, dan Ticketmaster
 
 ## 📞 Support
 
@@ -221,4 +321,3 @@ Jika ada masalah atau pertanyaan, silakan buat issue di repository ini.
 ## 📄 License
 
 MIT License - bebas digunakan untuk keperluan pribadi.
-

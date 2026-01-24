@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$SCRIPT_DIR"
 
 echo "Cleaning old caches..."
 rm -rf "$HOME/.wdm" "$HOME/.cache/selenium" "$HOME/Library/Caches/selenium" "logs"
@@ -25,7 +27,7 @@ if [ -z "$PORT" ]; then
   fi
 fi
 
-$PY -m pip install -q -r requirements.txt
+$PY -m pip install -q -r "$ROOT_DIR/requirements.txt"
 PANEL_PORT="$PORT" $PY web_panel.py &
 
 sleep 1

@@ -10,4 +10,3 @@ WAIT_TIME=5
 
 # Waktu untuk mulai monitoring (format: HH:MM)
 START_MONITORING_TIME=09:00
-

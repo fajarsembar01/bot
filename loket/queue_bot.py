@@ -13,7 +13,13 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
-import config
+try:
+    from . import config
+except ImportError:
+    try:
+        from loket import config
+    except ImportError:
+        import config
 
 
 class LoketQueueBot:
@@ -545,4 +551,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -2,7 +2,7 @@
 
 ## 📊 Ringkasan Perbandingan
 
-| Aspek | Bot Sederhana (`bot_simple.py`) | Bot Advanced (`bot_loket.py`) |
+| Aspek | Bot Sederhana (`loket/bot_simple.py`) | Bot Advanced (`loket/bot_loket.py`) |
 |-------|--------------------------------|------------------------------|
 | **Kompleksitas** | ⭐⭐ Sederhana | ⭐⭐⭐⭐⭐ Advanced |
 | **Kemudahan Pakai** | ✅ Sangat Mudah | ⚠️ Perlu setup |
@@ -12,7 +12,7 @@
 
 ---
 
-## 🤖 Bot Sederhana (`bot_simple.py`)
+## 🤖 Bot Sederhana (`loket/bot_simple.py`)
 
 ### ✅ Kelebihan:
 1. **Mudah digunakan** - Input parameter saat running, tidak perlu setup file config
@@ -33,13 +33,13 @@
 
 ### 💻 Cara Pakai:
 ```bash
-python3 bot_simple.py
+python3 loket/bot_simple.py
 # Input: Link konser + Text tombol
 ```
 
 ---
 
-## 🤖 Bot Advanced (`bot_loket.py`)
+## 🤖 Bot Advanced (`loket/bot_loket.py`)
 
 ### ✅ Kelebihan:
 1. **Auto-detect widget** - Otomatis cari link ke widget Loket di halaman
@@ -62,11 +62,11 @@ python3 bot_simple.py
 ### 💻 Cara Pakai:
 ```bash
 # Via config file
-python3 bot_loket.py
+python3 loket/bot_loket.py
 
 # Atau via argumen
-python3 bot_loket.py --url https://ateezinjakarta.com/
-python3 bot_loket.py --widget https://widget.loket.com/widget/xxxxx
+python3 loket/bot_loket.py --url https://ateezinjakarta.com/
+python3 loket/bot_loket.py --widget https://widget.loket.com/widget/xxxxx
 ```
 
 ---
@@ -89,8 +89,10 @@ python3 bot_loket.py --widget https://widget.loket.com/widget/xxxxx
 CONCERT_URL=https://ateezinjakarta.com/
 
 # Atau argumen:
-python3 bot_loket.py --url https://ateezinjakarta.com/
+python3 loket/bot_loket.py --url https://ateezinjakarta.com/
 ```
+
+**Catatan:** file `.env` disimpan di `loket/.env`.
 
 ### 2. **Metode Pencarian**
 
@@ -225,4 +227,3 @@ Ya! Anda bisa:
 | **Rekomendasi** | ⭐⭐⭐⭐⭐ Untuk kebanyakan orang | ⭐⭐⭐ Untuk case khusus |
 
 **💡 Tips**: Mulai dengan **Bot Sederhana** dulu. Jika tidak berhasil, baru coba **Bot Advanced**!
-

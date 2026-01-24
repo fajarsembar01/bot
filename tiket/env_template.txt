@@ -1,0 +1,7 @@
+# Copy file ini menjadi .env dan sesuaikan nilainya
+TIKET_URL=
+TIKET_PACKAGE=
+TIKET_QUANTITY=1
+TIKET_HEADLESS=False
+TIKET_REFRESH_SECONDS=3
+TIKET_MAX_ATTEMPTS=500

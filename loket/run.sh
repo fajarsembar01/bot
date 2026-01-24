@@ -6,19 +6,23 @@ echo "🤖 Bot Antrian Loket.com"
 echo "========================"
 echo ""
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$SCRIPT_DIR"
+
 # Cek apakah virtual environment ada
-if [ ! -d "venv" ]; then
+if [ ! -d "$ROOT_DIR/venv" ]; then
     echo "📦 Membuat virtual environment..."
-    python3 -m venv venv
+    python3 -m venv "$ROOT_DIR/venv"
 fi
 
 # Aktifkan virtual environment
 echo "🔧 Mengaktifkan virtual environment..."
-source venv/bin/activate
+source "$ROOT_DIR/venv/bin/activate"
 
 # Install dependencies jika belum
 echo "📥 Mengecek dependencies..."
-pip install -q -r requirements.txt
+pip install -q -r "$ROOT_DIR/requirements.txt"
 
 # Cek file .env
 if [ ! -f ".env" ]; then
@@ -33,4 +37,3 @@ fi
 echo "🚀 Menjalankan bot..."
 echo ""
 python bot_loket.py "$@"
-

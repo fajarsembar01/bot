@@ -1,0 +1,1 @@
+"""Ticketmaster bot package."""

@@ -16,7 +16,13 @@ from uuid import uuid4
 
 from flask import Flask, redirect, render_template_string, request, url_for
 
-from bot_simple import SimpleButtonBot
+try:
+    from .simple_bot import SimpleButtonBot
+except ImportError:
+    try:
+        from loket.simple_bot import SimpleButtonBot
+    except ImportError:
+        from simple_bot import SimpleButtonBot
 
 app = Flask(__name__)
 
@@ -255,6 +261,10 @@ class BotTask:
     debugger_address: str
     open_new_tab: bool
     close_on_exit: bool
+    aggressive_order: bool
+    aggressive_click: bool
+    skip_refresh: bool
+    auto_detect_widget: bool
     started_at: datetime
     user_data_dir: str = ""
     log_path: str = ""
@@ -481,6 +491,36 @@ PAGE_TEMPLATE = """
       flex-wrap: wrap;
       align-items: center;
     }
+    .section-title {
+      margin: 0 0 6px;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--muted);
+    }
+    .options-grid {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      margin: 6px 0 12px;
+    }
+    details.advanced {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 8px 12px;
+      margin-top: 10px;
+    }
+    details.advanced summary {
+      cursor: pointer;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--muted);
+      list-style: none;
+    }
+    details.advanced summary::-webkit-details-marker {
+      display: none;
+    }
     .inline-form {
       display: inline-flex;
       gap: 6px;
@@ -493,6 +533,9 @@ PAGE_TEMPLATE = """
       gap: 8px;
       color: var(--muted);
       font-size: 13px;
+    }
+    .hidden {
+      display: none;
     }
     button {
       border: none;
@@ -681,24 +724,42 @@ PAGE_TEMPLATE = """
 
     <div class="grid">
       <form class="card" method="post" action="{{ url_for('start_bot') }}">
+        <p class="section-title">Target</p>
         <label for="concert_url">Concert URL</label>
         <input id="concert_url" name="concert_url" type="text" placeholder="https://example.com" required />
 
-        <label for="button_text">Button text</label>
-        <input id="button_text" name="button_text" type="text" placeholder="Beli Tiket" required />
-
-        <div class="row">
-          <label class="checkbox"><input type="checkbox" name="auto_launch" checked /> Auto launch (isolated profile)</label>
+        <div class="row" style="margin-bottom: 10px;">
+          <label class="checkbox"><input id="auto_detect_widget" type="checkbox" name="auto_detect_widget" checked /> Auto-detect widget (recommended)</label>
         </div>
-        <p class="muted" style="margin: 0 0 12px;">Jika dicentang, bot buka Chrome baru dengan profile terpisah (session beda).</p>
 
-        <label for="debugger_address">Debugger address (optional)</label>
-        <input id="debugger_address" name="debugger_address" type="text" placeholder="127.0.0.1:9222 or 9222" />
-
-        <div class="row">
-          <label class="checkbox"><input type="checkbox" name="open_new_tab" checked /> Open new tab (for debugger)</label>
-          <label class="checkbox"><input type="checkbox" name="close_on_exit" /> Close browser on stop</label>
+        <div id="button_text_wrap">
+          <label for="button_text">Button text</label>
+          <input id="button_text" name="button_text" type="text" placeholder="Beli Tiket" />
         </div>
+
+        <p class="section-title">Browser</p>
+        <div class="options-grid">
+          <label class="checkbox"><input id="auto_launch" type="checkbox" name="auto_launch" checked /> Auto launch (recommended)</label>
+          <label class="checkbox"><input type="checkbox" name="skip_refresh" checked /> Hybrid refresh (recommended)</label>
+        </div>
+        <p class="muted" style="margin: 0 0 10px;">Auto launch: buka Chrome baru dengan profile terpisah.</p>
+
+        <div id="debugger_wrap">
+          <label for="debugger_address">Debugger address (optional)</label>
+          <input id="debugger_address" name="debugger_address" type="text" placeholder="127.0.0.1:9222 or 9222" />
+          <div class="options-grid">
+            <label class="checkbox"><input id="open_new_tab" type="checkbox" name="open_new_tab" checked /> Open new tab (for debugger)</label>
+          </div>
+        </div>
+
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <div class="options-grid" style="margin-top: 8px;">
+            <label class="checkbox"><input type="checkbox" name="aggressive_order" /> Aggressive order (skip qty check)</label>
+            <label class="checkbox"><input type="checkbox" name="aggressive_click" /> Aggressive click (skip scroll)</label>
+            <label class="checkbox"><input type="checkbox" name="close_on_exit" /> Close browser on stop</label>
+          </div>
+        </details>
 
         <div style="margin-top: 12px;">
           <button class="btn-start" type="submit">Start Bot</button>
@@ -733,8 +794,35 @@ PAGE_TEMPLATE = """
     (function () {
       const refreshIntervalMs = 2000;
       const tbody = document.getElementById("tasks-body");
+      const autoDetect = document.getElementById("auto_detect_widget");
+      const buttonTextWrap = document.getElementById("button_text_wrap");
+      const autoLaunch = document.getElementById("auto_launch");
+      const debuggerWrap = document.getElementById("debugger_wrap");
+      const debuggerInput = document.getElementById("debugger_address");
+      const openNewTab = document.getElementById("open_new_tab");
       if (!tbody) {
         return;
+      }
+      if (autoDetect && buttonTextWrap) {
+        const syncButtonText = () => {
+          buttonTextWrap.classList.toggle("hidden", autoDetect.checked);
+        };
+        syncButtonText();
+        autoDetect.addEventListener("change", syncButtonText);
+      }
+      if (autoLaunch && debuggerWrap) {
+        const syncDebugger = () => {
+          const show = !autoLaunch.checked;
+          debuggerWrap.classList.toggle("hidden", !show);
+          if (debuggerInput) {
+            debuggerInput.disabled = !show;
+          }
+          if (openNewTab) {
+            openNewTab.disabled = !show;
+          }
+        };
+        syncDebugger();
+        autoLaunch.addEventListener("change", syncDebugger);
       }
       function isFormActive() {
         const active = document.activeElement;
@@ -848,9 +936,13 @@ def start_bot():
     debugger_address = normalize_debugger_address(request.form.get("debugger_address"))
     open_new_tab = request.form.get("open_new_tab") == "on"
     close_on_exit = request.form.get("close_on_exit") == "on"
+    aggressive_order = request.form.get("aggressive_order") == "on"
+    aggressive_click = request.form.get("aggressive_click") == "on"
+    skip_refresh = request.form.get("skip_refresh") == "on"
+    auto_detect_widget = request.form.get("auto_detect_widget") == "on"
 
-    if not concert_url or not button_text:
-        return redirect(url_for("index", error="Concert URL dan button text wajib diisi."))
+    if not concert_url or (not button_text and not auto_detect_widget):
+        return redirect(url_for("index", error="Concert URL wajib diisi. Button text wajib diisi jika auto-detect widget tidak dicentang."))
 
     if not concert_url.startswith("http"):
         concert_url = "https://" + concert_url
@@ -902,6 +994,10 @@ def start_bot():
         debugger_address=debugger_address,
         open_new_tab=open_new_tab,
         close_on_exit=close_on_exit,
+        aggressive_order=aggressive_order,
+        aggressive_click=aggressive_click,
+        skip_refresh=skip_refresh,
+        auto_detect_widget=auto_detect_widget,
         started_at=datetime.now(),
         user_data_dir=user_data_dir,
         log_path=log_path,
@@ -917,6 +1013,10 @@ def start_bot():
         user_data_dir=user_data_dir or None,
         stop_event=task.stop_event,
         close_on_exit=close_on_exit,
+        aggressive_order=aggressive_order,
+        aggressive_click=aggressive_click,
+        skip_refresh=skip_refresh,
+        auto_detect_widget=auto_detect_widget,
         interactive=False,
     )
     task.thread = Thread(target=run_bot_task, args=(task,), daemon=True)
@@ -1019,6 +1119,10 @@ def restart_bot(task_id: str):
     debugger_address = task.debugger_address
     open_new_tab = task.open_new_tab
     close_on_exit = task.close_on_exit
+    aggressive_order = task.aggressive_order
+    aggressive_click = task.aggressive_click
+    skip_refresh = task.skip_refresh
+    auto_detect_widget = task.auto_detect_widget
     concert_url = task.concert_url
     button_text = task.button_text
     auto_buy = task.auto_buy
@@ -1072,6 +1176,10 @@ def restart_bot(task_id: str):
         user_data_dir=user_data_dir or None,
         stop_event=stop_event,
         close_on_exit=close_on_exit,
+        aggressive_order=aggressive_order,
+        aggressive_click=aggressive_click,
+        skip_refresh=skip_refresh,
+        auto_detect_widget=auto_detect_widget,
         interactive=False,
     )
     thread = Thread(target=run_bot_task, args=(task,), daemon=True)

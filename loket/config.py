@@ -2,11 +2,13 @@
 Konfigurasi untuk bot antrian Loket.com
 """
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load .env file jika ada
+# Load .env file jika ada (relative ke folder loket)
 try:
-    load_dotenv()
+    env_path = Path(__file__).resolve().parent / ".env"
+    load_dotenv(env_path)
 except Exception:
     pass  # File .env tidak wajib
 
@@ -31,4 +33,3 @@ SELECTORS = {
     "queue_status": ".queue-status, .antrean-status, [class*='queue'], [class*='antrean']",
     "login_button": "button.login, a.login, [href*='login']",
 }
-

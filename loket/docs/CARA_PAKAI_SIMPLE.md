@@ -1,4 +1,4 @@
-# 🚀 Cara Pakai Bot Sederhana (bot_simple.py)
+# 🚀 Cara Pakai Bot Sederhana (loket/bot_simple.py)
 
 Bot ini lebih sederhana dan fokus:
 - ✅ Refresh halaman setiap 3 detik
@@ -22,7 +22,7 @@ python3 -m pip install -r requirements.txt
 ### Langkah 2: Jalankan Bot
 
 ```bash
-python3 bot_simple.py
+python3 loket/bot_simple.py
 ```
 
 ### Langkah 3: Input Parameter
@@ -54,7 +54,7 @@ Bot akan meminta 2 parameter:
 ## 📝 Contoh Penggunaan
 
 ```bash
-$ python3 bot_simple.py
+$ python3 loket/bot_simple.py
 
 ============================================================
 🤖 BOT PENCARI TOMBOL LOKET.COM
@@ -203,4 +203,3 @@ Berikut beberapa contoh text tombol yang umum digunakan:
 ---
 
 **Selamat mencoba! Semoga dapat tiketnya! 🎫✨**
-
