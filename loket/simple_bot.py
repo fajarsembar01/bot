@@ -49,6 +49,7 @@ class SimpleButtonBot:
         aggressive_click=False,
         skip_refresh=False,
         auto_detect_widget=False,
+        on_order_click=None,
         interactive=True,
     ):
         self.concert_url = concert_url
@@ -83,6 +84,8 @@ class SimpleButtonBot:
         self._cached_buttons = []
         self.log_every = 5
         self.auto_buy_log_every = 5
+        self.on_order_click = on_order_click
+        self._order_click_notified = False
     
     def random_delay(self, min_seconds=0.5, max_seconds=4):
         """Random delay antara min dan max seconds"""
@@ -135,6 +138,37 @@ class SimpleButtonBot:
     def _should_stop(self):
         return self.stop_event is not None and self.stop_event.is_set()
 
+    def _is_order_button_text(self, text):
+        text = (text or "").lower().strip()
+        if not text:
+            return False
+        keywords = [
+            "pesan sekarang",
+            "pesan sekarng",
+            "order now",
+            "buy now",
+            "checkout",
+            "pesan",
+            "order",
+            "beli",
+            "buy",
+            "booking",
+            "purchase",
+            "get ticket",
+            "ticket",
+        ]
+        return any(keyword in text for keyword in keywords)
+
+    def _maybe_trigger_order_click(self, text_hint=""):
+        if self._order_click_notified or not self.on_order_click:
+            return
+        if self._is_order_button_text(text_hint) or self._is_order_button_text(self.button_text):
+            self._order_click_notified = True
+            try:
+                Thread(target=self.on_order_click, daemon=True).start()
+            except Exception as exc:
+                print(f"⚠️ Auto-open Chrome gagal: {exc}")
+
     def setup_driver(self):
         """Setup Chrome WebDriver"""
         print("Browser...")
@@ -152,6 +186,10 @@ class SimpleButtonBot:
             chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
             chrome_options.add_experimental_option('useAutomationExtension', False)
             chrome_options.add_argument("--window-size=1200,800")
+            # Kurangi throttle saat window/tab tidak fokus supaya klik tetap diproses
+            chrome_options.add_argument("--disable-background-timer-throttling")
+            chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+            chrome_options.add_argument("--disable-renderer-backgrounding")
             
             # User agent
             chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -416,6 +454,18 @@ class SimpleButtonBot:
     def click_button(self, button):
         """Klik tombol dengan berbagai metode, return True jika berhasil"""
         try:
+            button_text_hint = ""
+            try:
+                button_text_hint = (button.text or "").strip()
+                if not button_text_hint:
+                    button_text_hint = (button.get_attribute("aria-label") or button.get_attribute("title") or "").strip()
+            except:
+                button_text_hint = ""
+
+            def mark_success():
+                self._maybe_trigger_order_click(button_text_hint)
+                return True
+
             # Simpan URL dan beberapa info sebelum klik untuk cek perubahan
             url_before = self.driver.current_url
             title_before = self.driver.title
@@ -425,14 +475,14 @@ class SimpleButtonBot:
                     button.click()
                     self.random_delay(0.6, 1.6)
                     if self._check_click_success_strict(url_before, title_before):
-                        return True
+                        return mark_success()
                 except:
                     pass
                 try:
                     self.driver.execute_script("arguments[0].click();", button)
                     self.random_delay(0.6, 1.6)
                     if self._check_click_success_strict(url_before, title_before):
-                        return True
+                        return mark_success()
                 except:
                     pass
 
@@ -472,7 +522,7 @@ class SimpleButtonBot:
                 
                 # Cek apakah ada perubahan dengan verifikasi yang lebih ketat
                 if self._check_click_success_strict(url_before, title_before):
-                    return True
+                    return mark_success()
             except Exception as e:
                 pass
             
@@ -482,7 +532,7 @@ class SimpleButtonBot:
                 self.random_delay(0.6, 1.6)
                 
                 if self._check_click_success_strict(url_before, title_before):
-                    return True
+                    return mark_success()
             except:
                 pass
             
@@ -493,7 +543,7 @@ class SimpleButtonBot:
                 self.random_delay(0.6, 1.6)
                 
                 if self._check_click_success_strict(url_before, title_before):
-                    return True
+                    return mark_success()
             except:
                 pass
             
@@ -515,7 +565,7 @@ class SimpleButtonBot:
                 self.random_delay(0.6, 1.6)
                 
                 if self._check_click_success_strict(url_before, title_before):
-                    return True
+                    return mark_success()
             except:
                 pass
             
@@ -717,6 +767,14 @@ class SimpleButtonBot:
                                     
                                     if final_check:
                                         print(f"\n✅ Klik berhasil: {url_after_click}")
+                                        
+                                        # Cek apakah muncul halaman "Join the Queue" / Waiting Room
+                                        if self._detect_join_queue_page():
+                                            print("\n🎫 Halaman 'Join the Queue' terdeteksi")
+                                            if self._handle_join_queue_step():
+                                                print("✅ Berhasil masuk queue")
+                                            else:
+                                                print("⚠️ Gagal masuk queue, lanjutkan...")
                                         
                                         # Cek apakah ini widget Loket, jika ya tanya apakah mau auto beli
                                         if self._is_widget_url(url_after_click):
@@ -968,6 +1026,17 @@ class SimpleButtonBot:
                     self.random_delay(0.4, 0.8)
                     continue
 
+                # Cek dulu: apakah kita sudah berada di halaman form /register?
+                try:
+                    current_url_now = self.driver.current_url
+                except Exception:
+                    current_url_now = ""
+
+                # Hanya berhenti kalau benar-benar di halaman /register + form data diri
+                if self._is_order_complete_url(current_url_now) and self._is_checkout_form_page():
+                    print("\n✅ Detected personal data / register page - stopping auto-buy loop.")
+                    return True
+
                 current_category = self.ticket_category or category_name
                 current_quantity = self.ticket_quantity or quantity
 
@@ -994,7 +1063,25 @@ class SimpleButtonBot:
                         else:
                             self._click_privacy_popup(timeout_seconds=1)
                             self.random_delay(self.loop_delay_min, self.loop_delay_max)
+                    
                     if self.auto_buy_paused:
+                        continue
+                    
+                    # Cek apakah muncul halaman "Join the Queue" setelah refresh
+                    if self._detect_join_queue_page():
+                        print("\n🎫 Halaman 'Join the Queue' terdeteksi di auto-buy")
+                        if self._handle_join_queue_step():
+                            print("✅ Berhasil masuk queue, tunggu widget muncul...")
+                            # Tunggu widget muncul setelah join queue
+                            for wait_attempt in range(15):
+                                if self._should_stop():
+                                    break
+                                self.random_delay(1.0, 2.0)
+                                if self._is_widget_url(self.driver.current_url) or self._detect_widget_on_page():
+                                    print("✅ Widget muncul setelah join queue")
+                                    break
+                                if wait_attempt == 14:
+                                    print("⚠️ Widget belum muncul setelah join queue")
                         continue
 
                     # Cari kategori tiket
@@ -1123,9 +1210,35 @@ class SimpleButtonBot:
         return "widget.loket.com/widget" in url_lower or "loket.com/widget" in url_lower
 
     def _is_order_complete_url(self, url):
+        """Cek apakah URL sudah di step /register (konfirmasi / informasi personal)."""
         if not url:
             return False
-        return "/register" in url.lower()
+        url_base = url.split("#")[0].split("?")[0].strip().rstrip("/")
+        # Hanya anggap selesai jika benar-benar di path /register
+        return url_base.endswith("/register")
+
+    def _is_checkout_form_page(self):
+        """Deteksi halaman form data diri / personal information di widget Loket."""
+        try:
+            page_source = (self.driver.page_source or "").lower()
+            url = (self.driver.current_url or "").lower()
+        except Exception:
+            return False
+
+        # Harus sedang di widget loket
+        if "widget.loket.com/widget" not in url and "/register" not in url:
+            return False
+
+        keywords = [
+            "data diri",
+            "informasi personal",
+            "personal information",
+            "nama depan",
+            "nama belakang",
+            "nomor identitas",
+            "no. handphone",
+        ]
+        return any(k in page_source for k in keywords)
 
     def _normalize_widget_url(self, raw):
         raw = (raw or "").strip().strip("'\"")
@@ -1168,6 +1281,20 @@ class SimpleButtonBot:
 
     def _handle_widget_page(self, current_url):
         """Handle widget page actions such as privacy popup and auto-buy."""
+        # Cek apakah ada halaman "Join the Queue" sebelum masuk widget
+        if self._detect_join_queue_page():
+            print("\n🎫 Halaman 'Join the Queue' terdeteksi sebelum widget")
+            if self._handle_join_queue_step():
+                print("✅ Berhasil masuk queue, tunggu widget muncul...")
+                # Tunggu widget muncul setelah join queue
+                for _ in range(10):
+                    if self._should_stop():
+                        return
+                    self.random_delay(1.0, 2.0)
+                    if self._is_widget_url(self.driver.current_url) or self._detect_widget_on_page():
+                        print("✅ Widget muncul setelah join queue")
+                        break
+        
         self.widget_ready = True
         self._click_privacy_popup(timeout_seconds=6)
         if self._should_prompt_auto_buy(current_url):
@@ -1218,6 +1345,27 @@ class SimpleButtonBot:
         try:
             page_source = (self.driver.page_source or "").lower()
             return "we value your privacy" in page_source
+        except:
+            return False
+
+    def _page_has_terms_modal(self):
+        """Deteksi popup Terms & Conditions Loket di halaman widget."""
+        try:
+            page_source = (self.driver.page_source or "").lower()
+            if "terms and conditions" in page_source or "syarat dan ketentuan" in page_source:
+                return True
+            # Cari elemen modal spesifik
+            modals = self.driver.find_elements(
+                By.XPATH,
+                "//div[contains(@class, 'modal') or contains(@class, 'swal') or contains(@class, 'term')]"
+            )
+            for m in modals:
+                try:
+                    if m.is_displayed():
+                        return True
+                except:
+                    continue
+            return False
         except:
             return False
 
@@ -1363,21 +1511,64 @@ class SimpleButtonBot:
         end_time = time.time() + timeout_seconds
         
         def attempt_click():
+            # Loket T&C modal: tombol "Agree" / "Setuju"
             try:
-                agree_btn = self.driver.find_element(By.ID, "btn-agree-tnc")
+                agree_btn = None
+                try:
+                    agree_btn = self.driver.find_element(By.ID, "btn-agree-tnc")
+                except:
+                    pass
+
+                if not agree_btn:
+                    # Fallback: cari tombol berdasarkan text
+                    candidates = self.driver.find_elements(
+                        By.XPATH,
+                        "//button[contains(., 'Agree') or contains(., 'Setuju')] | "
+                        "//button[contains(., 'AGREE')] | "
+                        "//button[contains(., 'I Agree')]",
+                    )
+                    for btn in candidates:
+                        try:
+                            if btn.is_displayed():
+                                agree_btn = btn
+                                break
+                        except:
+                            continue
+
                 if agree_btn and agree_btn.is_displayed():
                     self.driver.execute_script(
                         "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
                         agree_btn,
                     )
                     self.random_delay(0.2, 0.4)
+                    clicked = False
                     try:
                         agree_btn.click()
+                        clicked = True
                     except:
-                        self.driver.execute_script("arguments[0].click();", agree_btn)
-                    print("✅ Agree")
-                    self.random_delay(0.2, 0.6)
-                    return True
+                        try:
+                            self.driver.execute_script("arguments[0].click();", agree_btn)
+                            clicked = True
+                        except:
+                            try:
+                                from selenium.webdriver.common.action_chains import ActionChains
+                                ActionChains(self.driver).move_to_element(agree_btn).click().perform()
+                                clicked = True
+                            except:
+                                clicked = False
+
+                    if clicked:
+                        # Tunggu sampai modal hilang
+                        for _ in range(20):
+                            self.random_delay(0.1, 0.2)
+                            try:
+                                if not agree_btn.is_displayed():
+                                    break
+                            except:
+                                break
+                        print("✅ Agree")
+                        self.random_delay(0.2, 0.6)
+                        return True
             except:
                 pass
 
@@ -1598,61 +1789,252 @@ class SimpleButtonBot:
             if not quantity_set and not self.aggressive_order:
                 return False
             
-            # Cari dan klik tombol Order Now
+            # Cari dan klik tombol Order Now / Pesan Sekarang
             try:
-                # Cari tombol Order Now di section atau di seluruh halaman
-                order_buttons = target_container.find_elements(By.XPATH, 
-                    ".//button[contains(., 'Order') or contains(., 'Pesan')] | " +
-                    ".//a[contains(., 'Order') or contains(., 'Pesan')]")
+                # Tunggu sedikit untuk memastikan quantity sudah ter-set dengan benar
+                self.random_delay(0.3, 0.6)
                 
-                # Jika tidak ada di section, cari di seluruh halaman
-                if not order_buttons:
-                    order_buttons = self.driver.find_elements(By.XPATH, 
-                        "//button[contains(., 'Order Now')] | //button[contains(., 'Order')] | " +
-                        "//a[contains(., 'Order Now')]")
+                # Cari tombol Order Now / Pesan Sekarang dengan berbagai variasi text
+                order_button_texts = [
+                    "Pesan Sekarang",
+                    "Order Now",
+                    "Pesan",
+                    "Order",
+                    "Beli",
+                    "Buy Now",
+                    "Checkout"
+                ]
                 
-                if order_buttons:
-                    order_btn = order_buttons[0]
-                    # Scroll ke tombol
-                    self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", order_btn)
-                    self.random_delay(0.2, 0.6)
-                    
-                    # Klik tombol dengan beberapa metode
-                    clicked = False
+                order_btn = None
+                
+                # Method 1: Cari di dalam section target_container
+                for btn_text in order_button_texts:
+                    try:
+                        order_buttons = target_container.find_elements(By.XPATH, 
+                            f".//button[contains(., '{btn_text}')] | "
+                            f".//a[contains(., '{btn_text}')] | "
+                            f".//*[@role='button'][contains(., '{btn_text}')]"
+                        )
+                        
+                        for btn in order_buttons:
+                            try:
+                                if btn.is_displayed():
+                                    btn_text_actual = (btn.text or "").strip()
+                                    if btn_text.lower() in btn_text_actual.lower():
+                                        order_btn = btn
+                                        break
+                            except:
+                                continue
+                        
+                        if order_btn:
+                            break
+                    except:
+                        continue
+                
+                # Method 2: Jika tidak ada di section, cari di seluruh halaman (prioritas "Pesan Sekarang")
+                if not order_btn:
+                    for btn_text in order_button_texts:
+                        try:
+                            order_buttons = self.driver.find_elements(By.XPATH, 
+                                f"//button[contains(., '{btn_text}')] | "
+                                f"//a[contains(., '{btn_text}')] | "
+                                f"//*[@role='button'][contains(., '{btn_text}')]"
+                            )
+                            
+                            for btn in order_buttons:
+                                try:
+                                    if not btn.is_displayed():
+                                        continue
+                                    
+                                    btn_text_actual = (btn.text or "").strip()
+                                    btn_aria = (btn.get_attribute('aria-label') or "").strip()
+                                    
+                                    # Prioritas untuk "Pesan Sekarang"
+                                    if btn_text == "Pesan Sekarang":
+                                        if 'pesan' in btn_text_actual.lower() and 'sekarang' in btn_text_actual.lower():
+                                            order_btn = btn
+                                            break
+                                    elif btn_text.lower() in btn_text_actual.lower() or btn_text.lower() in btn_aria.lower():
+                                        order_btn = btn
+                                        break
+                                except:
+                                    continue
+                            
+                            if order_btn:
+                                break
+                        except:
+                            continue
+                
+                # Method 3: Cari dengan class/id spesifik
+                if not order_btn:
+                    try:
+                        specific_selectors = [
+                            "//button[contains(@class, 'order')]",
+                            "//button[contains(@class, 'pesan')]",
+                            "//button[contains(@id, 'order')]",
+                            "//button[contains(@id, 'pesan')]",
+                            "//a[contains(@class, 'order')]",
+                            "//a[contains(@class, 'pesan')]"
+                        ]
+                        
+                        for selector in specific_selectors:
+                            try:
+                                buttons = self.driver.find_elements(By.XPATH, selector)
+                                for btn in buttons:
+                                    try:
+                                        if btn.is_displayed():
+                                            btn_text = (btn.text or "").strip().lower()
+                                            if any(text in btn_text for text in ['pesan', 'order', 'beli', 'buy']):
+                                                order_btn = btn
+                                                break
+                                    except:
+                                        continue
+                                if order_btn:
+                                    break
+                            except:
+                                continue
+                    except:
+                        pass
+                
+                if not order_btn:
+                    print("   ⚠️ Tombol 'Pesan Sekarang' tidak ditemukan")
+                    return False
+
+                order_btn_text = ""
+                try:
+                    order_btn_text = (order_btn.text or "").strip()
+                    if not order_btn_text:
+                        order_btn_text = (order_btn.get_attribute("aria-label") or order_btn.get_attribute("title") or "").strip()
+                except:
+                    order_btn_text = ""
+                
+                # Scroll ke tombol
+                try:
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
+                        order_btn
+                    )
+                    self.random_delay(0.3, 0.6)
+                except:
+                    pass
+                
+                # Pastikan tombol enabled dan visible
+                try:
+                    if order_btn.get_attribute('disabled') is not None:
+                        print("   ⚠️ Tombol 'Pesan Sekarang' disabled")
+                        return False
+                except:
+                    pass
+                
+                # Klik tombol dengan beberapa metode
+                print(f"   🖱️ Klik tombol: {(order_btn.text or '').strip()}")
+                url_before_click = self.driver.current_url
+                
+                clicked = False
+                
+                # Method 1: JavaScript click (paling reliable)
+                try:
+                    self.driver.execute_script("arguments[0].click();", order_btn)
+                    clicked = True
+                    self.random_delay(0.8, 1.5)
+                except:
+                    pass
+                
+                # Method 2: Normal click
+                if not clicked:
                     try:
                         order_btn.click()
                         clicked = True
+                        self.random_delay(0.8, 1.5)
                     except:
-                        try:
-                            self.driver.execute_script("arguments[0].click();", order_btn)
-                            clicked = True
-                        except:
-                            try:
-                                from selenium.webdriver.common.action_chains import ActionChains
-                                ActionChains(self.driver).move_to_element(order_btn).click().perform()
-                                clicked = True
-                            except:
-                                pass
-                    
-                    if clicked:
-                        self.random_delay(0.6, 1.6)
-                        
-                        # Jika muncul popup T&C, langsung klik Agree
-                        agree_clicked = self._click_agree_popup(timeout_seconds=8)
-                        
-                        # Cek apakah sudah masuk step register (order sukses)
-                        self.random_delay(0.4, 0.9)
+                        pass
+                
+                # Method 3: Action chains
+                if not clicked:
+                    try:
+                        from selenium.webdriver.common.action_chains import ActionChains
+                        ActionChains(self.driver).move_to_element(order_btn).click().perform()
+                        clicked = True
+                        self.random_delay(0.8, 1.5)
+                    except:
+                        pass
+                
+                # Method 4: Trigger event click via JavaScript (full event)
+                if not clicked:
+                    try:
+                        self.driver.execute_script("""
+                            var element = arguments[0];
+                            var events = ['mousedown', 'mouseup', 'click'];
+                            events.forEach(function(eventType) {
+                                var event = new MouseEvent(eventType, {
+                                    view: window,
+                                    bubbles: true,
+                                    cancelable: true,
+                                    buttons: 1
+                                });
+                                element.dispatchEvent(event);
+                            });
+                        """, order_btn)
+                        clicked = True
+                        self.random_delay(0.8, 1.5)
+                    except:
+                        pass
+                
+                if not clicked:
+                    print("   ⚠️ Gagal klik tombol 'Pesan Sekarang'")
+                    return False
+
+                self._maybe_trigger_order_click(order_btn_text)
+                
+                # Tunggu dan cek hasil
+                self.random_delay(0.6, 1.2)
+                
+                # Jika muncul popup T&C, langsung klik Agree
+                agree_clicked = self._click_agree_popup(timeout_seconds=12)
+
+                # Setelah klik Pesan Sekarang (dan Agree kalau ada), JANGAN langsung refresh.
+                # Tunggu beberapa detik sambil pantau apakah pindah ke /register atau halaman form.
+                wait_start = time.time()
+                max_wait = 25  # detik
+                while time.time() - wait_start < max_wait:
+                    if self._should_stop():
+                        return False
+                    self.random_delay(0.4, 0.8)
+                    try:
                         current_url = self.driver.current_url
-                        if self._is_order_complete_url(current_url):
+                    except Exception:
+                        current_url = ""
+
+                    # Kalau sudah di /register + form data diri -> sukses total
+                    if self._is_order_complete_url(current_url) and self._is_checkout_form_page():
+                        print("   ✅ Klik 'Pesan Sekarang' berhasil (masuk halaman Data Diri)")
+                        return True
+
+                    # Kalau URL sudah berubah signifikan dari sebelum klik, anggap klik berhasil
+                    if current_url and current_url != url_before_click:
+                        url_before_base = url_before_click.split('#')[0].split('?')[0].strip().rstrip('/')
+                        url_after_base = current_url.split('#')[0].split('?')[0].strip().rstrip('/')
+                        if url_before_base != url_after_base:
+                            print("   ✅ Klik 'Pesan Sekarang' berhasil (URL berubah)")
                             return True
 
-                        if agree_clicked:
-                            return False
-                        return False
-                    else:
-                        return False
-                else:
+                    # Kalau modal T&C masih kelihatan, coba klik lagi sebentar
+                    if agree_clicked and self._page_has_terms_modal():
+                        self._click_agree_popup(timeout_seconds=6)
+
+                # Sampai timeout belum pindah ke /register
+                if agree_clicked:
+                    print("   ⚠️ Popup T&C diklik tapi belum pindah ke halaman Data Diri (timeout)")
                     return False
+
+                print("   ⚠️ Klik 'Pesan Sekarang' dilakukan tapi hasil tidak jelas (timeout tunggu redirect)")
+                return False
+                    
+            except Exception as e:
+                print(f"   ⚠️ Error saat klik Order/Pesan: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
                     
             except Exception as e:
                 print(f"   ⚠️ Error saat klik Order: {e}")
@@ -1676,6 +2058,13 @@ class SimpleButtonBot:
                 if current_url != initial_url and current_url.split('#')[0] != initial_url.split('#')[0]:
                     break
                 
+                # Cek apakah muncul halaman "Join the Queue"
+                if self._detect_join_queue_page():
+                    print("\n🎫 Halaman 'Join the Queue' terdeteksi")
+                    if self._handle_join_queue_step():
+                        print("✅ Berhasil masuk queue")
+                    break
+                
                 # Cek apakah ada elemen checkout/pembelian
                 page_source = self.driver.page_source.lower()
                 if any(keyword in page_source for keyword in ['checkout', 'pembelian', 'order now', 'select category', 'widget.loket.com']):
@@ -1684,6 +2073,398 @@ class SimpleButtonBot:
                 self.random_delay(0.5, 1.2)
             except:
                 self.random_delay(0.5, 1.2)
+    
+    def _detect_join_queue_page(self):
+        """Deteksi apakah halaman saat ini adalah halaman 'Join the Queue' / Waiting Room"""
+        try:
+            current_url = self.driver.current_url.lower()
+            page_source = (self.driver.page_source or "").lower()
+            
+            # Indikator URL
+            url_indicators = [
+                'waiting',
+                'queue',
+                'antrean',
+                'join-queue',
+                'join_queue'
+            ]
+            
+            # Indikator teks di halaman
+            text_indicators = [
+                'waiting room',
+                'join the queue',
+                'join queue',
+                'masuk antrean',
+                'antrean tiket',
+                'please click the button below to initiate',
+                'ticket purchase queueing process'
+            ]
+            
+            # Cek URL
+            for indicator in url_indicators:
+                if indicator in current_url:
+                    return True
+            
+            # Cek teks di halaman
+            for indicator in text_indicators:
+                if indicator in page_source:
+                    return True
+            
+            # Cek elemen spesifik
+            try:
+                # Cari tombol "Join the Queue"
+                join_queue_buttons = self.driver.find_elements(By.XPATH, 
+                    "//button[contains(., 'Join') and contains(., 'Queue')] | "
+                    "//a[contains(., 'Join') and contains(., 'Queue')] | "
+                    "//button[contains(., 'Join the Queue')] | "
+                    "//*[@role='button'][contains(., 'Join') and contains(., 'Queue')]"
+                )
+                if join_queue_buttons:
+                    for btn in join_queue_buttons:
+                        try:
+                            if btn.is_displayed():
+                                return True
+                        except:
+                            continue
+            except:
+                pass
+            
+            # Cek heading "Waiting Room"
+            try:
+                waiting_room_headers = self.driver.find_elements(By.XPATH,
+                    "//h1[contains(., 'Waiting Room')] | "
+                    "//h2[contains(., 'Waiting Room')] | "
+                    "//*[contains(@class, 'waiting-room')] | "
+                    "//*[contains(@id, 'waiting-room')]"
+                )
+                if waiting_room_headers:
+                    return True
+            except:
+                pass
+            
+            return False
+        except Exception as e:
+            return False
+    
+    def _detect_cloudflare_challenge(self):
+        """Deteksi apakah ada Cloudflare challenge yang sedang berlangsung"""
+        try:
+            page_source = (self.driver.page_source or "").lower()
+            current_url = self.driver.current_url.lower()
+            
+            # Indikator Cloudflare challenge
+            cloudflare_indicators = [
+                'cloudflare',
+                'checking your browser',
+                'please wait',
+                'ddos protection',
+                'ray id',
+                'cf-browser-verification',
+                'cf-challenge',
+                'challenge-platform',
+                '__cf_bm',
+                'cf_clearance'
+            ]
+            
+            # Cek di page source
+            for indicator in cloudflare_indicators:
+                if indicator in page_source:
+                    return True
+            
+            # Cek elemen spesifik Cloudflare
+            try:
+                # Cek logo Cloudflare
+                cloudflare_elements = self.driver.find_elements(By.XPATH,
+                    "//*[contains(@class, 'cf-')] | "
+                    "//*[contains(@id, 'cf-')] | "
+                    "//*[contains(@class, 'cloudflare')] | "
+                    "//img[contains(@alt, 'Cloudflare')] | "
+                    "//*[contains(text(), 'Cloudflare')]"
+                )
+                if cloudflare_elements:
+                    return True
+                
+                # Cek error message Cloudflare
+                error_elements = self.driver.find_elements(By.XPATH,
+                    "//*[contains(text(), 'Kegagalan')] | "
+                    "//*[contains(text(), 'Failure')] | "
+                    "//*[contains(text(), 'Mengalami masalah')]"
+                )
+                if error_elements:
+                    # Cek apakah ada logo Cloudflare di dekatnya
+                    for elem in error_elements:
+                        try:
+                            parent = elem.find_element(By.XPATH, "./ancestor::*[contains(@class, 'cloudflare') or contains(@id, 'cf-')]")
+                            if parent:
+                                return True
+                        except:
+                            pass
+            except:
+                pass
+            
+            # Cek apakah ada iframe Cloudflare
+            try:
+                iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+                for iframe in iframes:
+                    src = (iframe.get_attribute('src') or '').lower()
+                    if 'cloudflare' in src or 'challenges.cloudflare.com' in src:
+                        return True
+            except:
+                pass
+            
+            return False
+        except Exception as e:
+            return False
+    
+    def _wait_for_cloudflare_bypass(self, timeout_seconds=30):
+        """Tunggu sampai Cloudflare challenge selesai"""
+        print("🛡️ Cloudflare challenge terdeteksi, menunggu bypass...")
+        start_time = time.time()
+        last_log_time = start_time
+        
+        while time.time() - start_time < timeout_seconds:
+            if self._should_stop():
+                return False
+            
+            # Cek apakah Cloudflare challenge masih ada
+            if not self._detect_cloudflare_challenge():
+                # Tunggu sedikit lagi untuk memastikan challenge benar-benar selesai
+                self.random_delay(1.0, 2.0)
+                if not self._detect_cloudflare_challenge():
+                    print("✅ Cloudflare challenge selesai")
+                    return True
+            
+            # Log progress setiap 5 detik
+            elapsed = time.time() - last_log_time
+            if elapsed >= 5:
+                remaining = timeout_seconds - (time.time() - start_time)
+                print(f"   ⏳ Menunggu Cloudflare... ({int(remaining)}s tersisa)", end='\r')
+                last_log_time = time.time()
+            
+            self.random_delay(0.5, 1.0)
+        
+        print(f"\n⚠️ Cloudflare challenge timeout setelah {timeout_seconds}s")
+        return False
+    
+    def _handle_join_queue_step(self):
+        """Handle langkah 'Join the Queue' - deteksi dan klik tombol"""
+        try:
+            # Tunggu halaman selesai load
+            self.random_delay(1.0, 2.0)
+            
+            # Cek dan handle Cloudflare challenge jika ada
+            if self._detect_cloudflare_challenge():
+                if not self._wait_for_cloudflare_bypass(timeout_seconds=30):
+                    print("⚠️ Cloudflare challenge tidak selesai, lanjutkan...")
+                    return False
+            
+            # Cari tombol "Join the Queue" dengan berbagai metode
+            join_queue_button = None
+            
+            # Method 1: Cari dengan text "Join the Queue" atau variasi
+            try:
+                button_texts = [
+                    "Join the Queue",
+                    "Join the Queue >",
+                    "Join Queue",
+                    "Masuk Antrean",
+                    "Join",
+                    "Queue"
+                ]
+                
+                for btn_text in button_texts:
+                    try:
+                        buttons = self.driver.find_elements(By.XPATH,
+                            f"//button[contains(., '{btn_text}')] | "
+                            f"//a[contains(., '{btn_text}')] | "
+                            f"//*[@role='button'][contains(., '{btn_text}')] | "
+                            f"//*[contains(@class, 'btn')][contains(., '{btn_text}')]"
+                        )
+                        
+                        for btn in buttons:
+                            try:
+                                if btn.is_displayed():
+                                    btn_text_actual = (btn.text or "").strip()
+                                    if any(text.lower() in btn_text_actual.lower() for text in button_texts[:3]):
+                                        join_queue_button = btn
+                                        break
+                            except:
+                                continue
+                        
+                        if join_queue_button:
+                            break
+                    except:
+                        continue
+            except:
+                pass
+            
+            # Method 2: Cari dengan class/id spesifik
+            if not join_queue_button:
+                try:
+                    selectors = [
+                        "//button[contains(@class, 'join-queue')]",
+                        "//button[contains(@class, 'join_queue')]",
+                        "//button[contains(@id, 'join-queue')]",
+                        "//a[contains(@class, 'join-queue')]",
+                        "//*[@role='button'][contains(@class, 'queue')]"
+                    ]
+                    
+                    for selector in selectors:
+                        try:
+                            buttons = self.driver.find_elements(By.XPATH, selector)
+                            for btn in buttons:
+                                try:
+                                    if btn.is_displayed():
+                                        join_queue_button = btn
+                                        break
+                                except:
+                                    continue
+                            if join_queue_button:
+                                break
+                        except:
+                            continue
+                except:
+                    pass
+            
+            # Method 3: Cari semua button dan filter berdasarkan text
+            if not join_queue_button:
+                try:
+                    all_buttons = self.driver.find_elements(By.XPATH, "//button | //a | //*[@role='button']")
+                    for btn in all_buttons:
+                        try:
+                            if not btn.is_displayed():
+                                continue
+                            
+                            btn_text = (btn.text or "").strip().lower()
+                            btn_aria = (btn.get_attribute('aria-label') or "").strip().lower()
+                            
+                            keywords = ['join', 'queue', 'antrean']
+                            if any(keyword in btn_text or keyword in btn_aria for keyword in keywords):
+                                # Pastikan bukan tombol lain yang kebetulan mengandung kata tersebut
+                                if 'join' in btn_text or 'queue' in btn_text:
+                                    join_queue_button = btn
+                                    break
+                        except:
+                            continue
+                except:
+                    pass
+            
+            if not join_queue_button:
+                print("⚠️ Tombol 'Join the Queue' tidak ditemukan")
+                return False
+            
+            # Scroll ke tombol
+            try:
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
+                    join_queue_button
+                )
+                self.random_delay(0.3, 0.6)
+            except:
+                pass
+            
+            # Klik tombol dengan berbagai metode
+            print("🖱️ Mencoba klik tombol 'Join the Queue'...")
+            
+            url_before = self.driver.current_url
+            
+            # Method 1: JavaScript click
+            try:
+                self.driver.execute_script("arguments[0].click();", join_queue_button)
+                self.random_delay(1.0, 2.0)
+                
+                # Cek apakah berhasil
+                url_after = self.driver.current_url
+                if url_after != url_before:
+                    print("✅ Klik 'Join the Queue' berhasil (URL berubah)")
+                    return True
+                
+                # Cek apakah halaman berubah (widget muncul)
+                if self._is_widget_url(url_after) or self._detect_widget_on_page():
+                    print("✅ Klik 'Join the Queue' berhasil (widget muncul)")
+                    return True
+            except Exception as e:
+                pass
+            
+            # Method 2: Normal click
+            try:
+                join_queue_button.click()
+                self.random_delay(1.0, 2.0)
+                
+                url_after = self.driver.current_url
+                if url_after != url_before:
+                    print("✅ Klik 'Join the Queue' berhasil (URL berubah)")
+                    return True
+                
+                if self._is_widget_url(url_after) or self._detect_widget_on_page():
+                    print("✅ Klik 'Join the Queue' berhasil (widget muncul)")
+                    return True
+            except Exception as e:
+                pass
+            
+            # Method 3: Action chains
+            try:
+                from selenium.webdriver.common.action_chains import ActionChains
+                ActionChains(self.driver).move_to_element(join_queue_button).click().perform()
+                self.random_delay(1.0, 2.0)
+                
+                url_after = self.driver.current_url
+                if url_after != url_before:
+                    print("✅ Klik 'Join the Queue' berhasil (URL berubah)")
+                    return True
+                
+                if self._is_widget_url(url_after) or self._detect_widget_on_page():
+                    print("✅ Klik 'Join the Queue' berhasil (widget muncul)")
+                    return True
+            except Exception as e:
+                pass
+            
+            # Tunggu sedikit dan cek lagi apakah widget muncul
+            self.random_delay(2.0, 3.0)
+            if self._is_widget_url(self.driver.current_url) or self._detect_widget_on_page():
+                print("✅ Widget muncul setelah klik 'Join the Queue'")
+                return True
+            
+            print("⚠️ Klik 'Join the Queue' dilakukan tapi hasil tidak jelas")
+            return False
+            
+        except Exception as e:
+            print(f"⚠️ Error handling 'Join the Queue': {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _detect_widget_on_page(self):
+        """Deteksi apakah widget Loket sudah muncul di halaman"""
+        try:
+            page_source = (self.driver.page_source or "").lower()
+            
+            # Indikator widget Loket
+            widget_indicators = [
+                'widget.loket.com',
+                'pilih kategori',
+                'select category',
+                'ticket-item',
+                'loket.com/widget'
+            ]
+            
+            for indicator in widget_indicators:
+                if indicator in page_source:
+                    return True
+            
+            # Cek iframe widget
+            try:
+                iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+                for iframe in iframes:
+                    src = (iframe.get_attribute('src') or '').lower()
+                    if 'widget.loket.com' in src or 'loket.com/widget' in src:
+                        return True
+            except:
+                pass
+            
+            return False
+        except:
+            return False
 
 
 def main():

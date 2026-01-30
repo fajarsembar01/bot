@@ -239,6 +239,18 @@ def activate_chrome_target(debugger_address: str) -> str:
     return ""
 
 
+def make_auto_open_chrome_handler(debugger_address: str, task_id: str = ""):
+    def handler():
+        if not debugger_address:
+            return
+        err = activate_chrome_target(debugger_address)
+        if err:
+            label = f" ({task_id})" if task_id else ""
+            print(f"⚠️ Auto-open Chrome{label} gagal: {err}")
+
+    return handler
+
+
 def read_log_tail(path: Path, max_bytes: int = 40000) -> str:
     if not path.exists():
         return ""
@@ -282,6 +294,14 @@ TASKS_LOCK = Lock()
 
 def is_active(status: str) -> bool:
     return status in {"starting", "running", "stopping"}
+
+
+def is_task_active(task: BotTask) -> bool:
+    if not is_active(task.status):
+        return False
+    if task.thread and not task.thread.is_alive():
+        return False
+    return True
 
 
 def run_bot_task(task: BotTask) -> None:
@@ -410,6 +430,11 @@ TABLE_BODY_TEMPLATE = """
                 </button>
               </form>
               {% endif %}
+              <form class="inline-form" method="post" action="{{ url_for('delete_bot', task_id=task.task_id) }}" onsubmit="return confirm('Hapus bot ini?');">
+                <button class="icon-btn btn-delete" type="submit" title="Hapus">
+                  <svg class="icon"><use href="#icon-trash"></use></svg>
+                </button>
+              </form>
             </div>
           </td>
         </tr>
@@ -583,8 +608,13 @@ PAGE_TEMPLATE = """
       color: var(--danger);
       border: 1px solid var(--danger);
     }
+    .btn-delete {
+      background: var(--danger);
+      color: #0b0f15;
+    }
     .icon-btn.btn-start,
-    .icon-btn.btn-chrome {
+    .icon-btn.btn-chrome,
+    .icon-btn.btn-delete {
       border: none;
     }
     .alert {
@@ -707,6 +737,13 @@ PAGE_TEMPLATE = """
     </symbol>
     <symbol id="icon-check" viewBox="0 0 24 24">
       <path d="M5 13l4 4L19 7"></path>
+    </symbol>
+    <symbol id="icon-trash" viewBox="0 0 24 24">
+      <polyline points="3 6 5 6 21 6"></polyline>
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+      <path d="M10 11v6"></path>
+      <path d="M14 11v6"></path>
+      <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path>
     </symbol>
   </svg>
   <div class="wrap">
@@ -1017,6 +1054,7 @@ def start_bot():
         aggressive_click=aggressive_click,
         skip_refresh=skip_refresh,
         auto_detect_widget=auto_detect_widget,
+        on_order_click=make_auto_open_chrome_handler(debugger_address, task_id),
         interactive=False,
     )
     task.thread = Thread(target=run_bot_task, args=(task,), daemon=True)
@@ -1180,6 +1218,7 @@ def restart_bot(task_id: str):
         aggressive_click=aggressive_click,
         skip_refresh=skip_refresh,
         auto_detect_widget=auto_detect_widget,
+        on_order_click=make_auto_open_chrome_handler(debugger_address, task_id),
         interactive=False,
     )
     thread = Thread(target=run_bot_task, args=(task,), daemon=True)
@@ -1207,6 +1246,18 @@ def view_log(task_id: str):
         return "Log not found", 404
     log_content = read_log_tail(Path(task.log_path))
     return render_template_string(LOG_TEMPLATE, task=task, log_content=log_content)
+
+
+@app.post("/delete/<task_id>")
+def delete_bot(task_id: str):
+    with TASKS_LOCK:
+        task = TASKS.get(task_id)
+        if not task:
+            return redirect(url_for("index", error="Bot tidak ditemukan."))
+        if is_task_active(task):
+            return redirect(url_for("index", error="Bot masih berjalan. Stop dulu sebelum hapus."))
+        TASKS.pop(task_id, None)
+    return redirect(url_for("index"))
 
 
 @app.post("/stop/<task_id>")
