@@ -131,6 +131,97 @@ def find_chrome_path() -> str:
     return ""
 
 
+def detect_default_user_data_dir() -> str:
+    env_path = (os.environ.get("CHROME_USER_DATA_DIR") or "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    candidates = []
+    if is_macos():
+        candidates.extend([
+            Path.home() / "Library/Application Support/Google/Chrome",
+            Path.home() / "Library/Application Support/Chromium",
+        ])
+    elif is_windows():
+        local_app_data = (os.environ.get("LOCALAPPDATA") or "").strip()
+        if local_app_data:
+            candidates.extend([
+                Path(local_app_data) / "Google/Chrome/User Data",
+                Path(local_app_data) / "Chromium/User Data",
+            ])
+    else:
+        candidates.extend([
+            Path.home() / ".config/google-chrome",
+            Path.home() / ".config/chromium",
+        ])
+
+    for path in candidates:
+        if path.exists():
+            return str(path)
+    return str(candidates[0]) if candidates else ""
+
+
+def list_chrome_profiles(user_data_dir: str):
+    root = Path((user_data_dir or "").strip()).expanduser()
+    if not root.exists() or not root.is_dir():
+        return []
+
+    info_cache = {}
+    local_state_path = root / "Local State"
+    if local_state_path.exists():
+        try:
+            local_state = json.loads(local_state_path.read_text(encoding="utf-8"))
+            info_cache = ((local_state.get("profile") or {}).get("info_cache") or {})
+            if not isinstance(info_cache, dict):
+                info_cache = {}
+        except Exception:
+            info_cache = {}
+
+    profile_ids = set()
+    for profile_id in info_cache.keys():
+        if profile_id == "Default" or profile_id.startswith("Profile "):
+            profile_ids.add(profile_id)
+
+    try:
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            name = child.name
+            if name != "Default" and not name.startswith("Profile "):
+                continue
+            if (child / "Preferences").exists() or name == "Default":
+                profile_ids.add(name)
+    except Exception:
+        pass
+
+    def profile_sort_key(profile_id: str):
+        if profile_id == "Default":
+            return (0, 0, profile_id)
+        if profile_id.startswith("Profile "):
+            raw_num = profile_id.replace("Profile ", "", 1).strip()
+            try:
+                return (1, int(raw_num), profile_id)
+            except ValueError:
+                return (1, 10**9, profile_id)
+        return (2, 10**9, profile_id)
+
+    profiles = []
+    for profile_id in sorted(profile_ids, key=profile_sort_key):
+        info = info_cache.get(profile_id) or {}
+        display_name = (info.get("name") or "").strip()
+        email = (info.get("user_name") or "").strip()
+
+        if display_name and display_name != profile_id:
+            label = f"{display_name} ({profile_id})"
+        else:
+            label = profile_id
+        if email:
+            label = f"{label} - {email}"
+
+        profiles.append({"value": profile_id, "label": label})
+    return profiles
+
+
 def is_port_available(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -151,20 +242,27 @@ def find_free_port(start_port: int = 9222, max_tries: int = 50, exclude_ports=No
     return None
 
 
-def wait_for_port(port: int, timeout_seconds: float = 6.0) -> bool:
+def wait_for_port(port: int, timeout_seconds: float = 15.0, initial_delay: float = 0.0) -> bool:
+    if initial_delay > 0:
+        time.sleep(initial_delay)
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(0.2)
+            sock.settimeout(0.5)
             try:
                 sock.connect(("127.0.0.1", port))
                 return True
             except OSError:
-                time.sleep(0.2)
+                time.sleep(0.3)
     return False
 
 
-def launch_chrome(port: Optional[int], profile_dir: Path, start_url: str):
+def launch_chrome(
+    port: Optional[int],
+    profile_dir: Path,
+    start_url: str,
+    profile_directory: str = "",
+):
     chrome_path = find_chrome_path()
     if not chrome_path:
         return None, "Chrome tidak ditemukan. Install Chrome atau set CHROME_PATH."
@@ -183,13 +281,17 @@ def launch_chrome(port: Optional[int], profile_dir: Path, start_url: str):
         "--new-window",
         start_url,
     ])
-    if is_macos() and ".app/Contents/MacOS/" in chrome_path:
-        app_path = chrome_path.split(".app/Contents/MacOS/")[0] + ".app"
-        cmd = ["open", "-g", "-n", "-a", app_path, "--args", *args]
-    else:
-        cmd = [chrome_path, *args]
+    profile_directory = (profile_directory or "").strip()
+    if profile_directory:
+        args.insert(1, f"--profile-directory={profile_directory}")
+    cmd = [chrome_path, *args]
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
         return proc, ""
     except Exception as exc:
         return None, str(exc)
@@ -267,6 +369,7 @@ class BotTask:
     auto_detect_widget: bool
     started_at: datetime
     user_data_dir: str = ""
+    chrome_profile_directory: str = ""
     log_path: str = ""
     status: str = "starting"
     error: str = ""
@@ -398,6 +501,9 @@ TABLE_BODY_TEMPLATE = """
               </form>
               {% endif %}
               {% if task.status in ['starting', 'running', 'stopping'] %}
+              <button class="icon-btn btn-advanced" type="button" data-advanced-toggle="{{ task.task_id }}" title="Advanced">
+                <svg class="icon"><use href="#icon-settings"></use></svg>
+              </button>
               <form class="inline-form" method="post" action="{{ url_for('stop_bot', task_id=task.task_id) }}">
                 <button class="icon-btn btn-stop" type="submit" title="Stop">
                   <svg class="icon"><use href="#icon-stop"></use></svg>
@@ -413,6 +519,22 @@ TABLE_BODY_TEMPLATE = """
             </div>
           </td>
         </tr>
+        {% if task.status in ['starting', 'running', 'stopping'] %}
+        <tr class="advanced-row hidden" data-advanced-row="{{ task.task_id }}">
+          <td colspan="5">
+            <form class="advanced-form" method="post" action="{{ url_for('update_advanced', task_id=task.task_id) }}">
+              <div class="advanced-panel">
+                <label class="checkbox"><input type="checkbox" name="aggressive_order" {% if task.aggressive_order %}checked{% endif %} /> Aggressive order (skip qty check)</label>
+                <label class="checkbox"><input type="checkbox" name="aggressive_click" {% if task.aggressive_click %}checked{% endif %} /> Aggressive click (skip scroll)</label>
+                <label class="checkbox"><input type="checkbox" name="close_on_exit" {% if task.close_on_exit %}checked{% endif %} /> Close browser on stop</label>
+                <button class="icon-btn btn-start" type="submit" title="Update">
+                  <svg class="icon"><use href="#icon-check"></use></svg>
+                </button>
+              </div>
+            </form>
+          </td>
+        </tr>
+        {% endif %}
         {% endfor %}
 """
 
@@ -667,6 +789,29 @@ PAGE_TEMPLATE = """
     .action-group form {
       margin: 0;
     }
+    .advanced-form {
+      margin: 0;
+    }
+    .advanced-row td {
+      padding: 10px 8px;
+      white-space: normal;
+    }
+    .advanced-panel {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px 16px;
+      background: #0b0f15;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+    }
+    .advanced-panel .checkbox {
+      color: var(--text);
+    }
+    .btn-advanced {
+      color: #fbbf24;
+    }
     .icon-sprite {
       display: none;
     }
@@ -708,6 +853,10 @@ PAGE_TEMPLATE = """
     <symbol id="icon-check" viewBox="0 0 24 24">
       <path d="M5 13l4 4L19 7"></path>
     </symbol>
+    <symbol id="icon-settings" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="3"></circle>
+      <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5h.1a1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"></path>
+    </symbol>
   </svg>
   <div class="wrap">
     <h1>Bot Simple Panel</h1>
@@ -743,6 +892,23 @@ PAGE_TEMPLATE = """
           <label class="checkbox"><input type="checkbox" name="skip_refresh" checked /> Hybrid refresh (recommended)</label>
         </div>
         <p class="muted" style="margin: 0 0 10px;">Auto launch: buka Chrome baru dengan profile terpisah.</p>
+        <div id="launch_profile_wrap">
+          <label for="launch_profile_preset">Pilih profile Chrome (optional)</label>
+          <select id="launch_profile_preset" name="launch_profile_preset">
+            <option value="">-- Manual / profile baru --</option>
+            {% for profile in chrome_profiles %}
+            <option value="{{ profile.value }}">{{ profile.label }}</option>
+            {% endfor %}
+          </select>
+          <label for="launch_user_data_dir">Auto launch user-data-dir (optional)</label>
+          <input id="launch_user_data_dir" name="launch_user_data_dir" type="text" placeholder="Kosongkan untuk profile baru tiap bot" data-detected-user-data-dir="{{ detected_user_data_dir }}" />
+          <label for="launch_profile_directory">Auto launch profile-directory (optional)</label>
+          <input id="launch_profile_directory" name="launch_profile_directory" type="text" placeholder="Default / Profile 1" />
+          {% if detected_user_data_dir %}
+          <p class="muted" style="margin: -2px 0 4px;">Detected user-data-dir: {{ detected_user_data_dir }}</p>
+          {% endif %}
+          <p class="muted" style="margin: 0 0 10px;">Bisa pilih dari dropdown, atau isi manual user-data-dir + profile-directory.</p>
+        </div>
 
         <div id="debugger_wrap">
           <label for="debugger_address">Debugger address (optional)</label>
@@ -769,6 +935,7 @@ PAGE_TEMPLATE = """
       <div class="card">
         <h3>Notes</h3>
         <p class="muted">- Centang Auto launch supaya bot buka Chrome baru dengan profile terpisah.</p>
+        <p class="muted">- Untuk Cloudflare, bisa isi user-data-dir + profile-directory agar pakai history profile utama.</p>
         <p class="muted">- Satu bot per debugger address untuk menghindari tab bentrok.</p>
         <p class="muted">- Jika Auto launch mati dan debugger address kosong, bot membuka Chrome baru.</p>
         <p class="muted">- Untuk Chrome yang sudah dibuka, gunakan port berbeda untuk sesi berbeda.</p>
@@ -797,9 +964,17 @@ PAGE_TEMPLATE = """
       const autoDetect = document.getElementById("auto_detect_widget");
       const buttonTextWrap = document.getElementById("button_text_wrap");
       const autoLaunch = document.getElementById("auto_launch");
+      const launchProfileWrap = document.getElementById("launch_profile_wrap");
+      const launchProfilePreset = document.getElementById("launch_profile_preset");
+      const launchUserDataDir = document.getElementById("launch_user_data_dir");
+      const launchProfileDirectory = document.getElementById("launch_profile_directory");
+      const detectedUserDataDir = launchUserDataDir
+        ? (launchUserDataDir.getAttribute("data-detected-user-data-dir") || "").trim()
+        : "";
       const debuggerWrap = document.getElementById("debugger_wrap");
       const debuggerInput = document.getElementById("debugger_address");
       const openNewTab = document.getElementById("open_new_tab");
+      const advancedOpen = new Set();
       if (!tbody) {
         return;
       }
@@ -812,17 +987,76 @@ PAGE_TEMPLATE = """
       }
       if (autoLaunch && debuggerWrap) {
         const syncDebugger = () => {
-          const show = !autoLaunch.checked;
-          debuggerWrap.classList.toggle("hidden", !show);
+          const autoLaunchEnabled = autoLaunch.checked;
+          debuggerWrap.classList.toggle("hidden", autoLaunchEnabled);
           if (debuggerInput) {
-            debuggerInput.disabled = !show;
+            debuggerInput.disabled = autoLaunchEnabled;
           }
           if (openNewTab) {
-            openNewTab.disabled = !show;
+            openNewTab.disabled = autoLaunchEnabled;
+          }
+          if (launchProfileWrap) {
+            launchProfileWrap.classList.toggle("hidden", !autoLaunchEnabled);
+          }
+          if (launchUserDataDir) {
+            launchUserDataDir.disabled = !autoLaunchEnabled;
+          }
+          if (launchProfilePreset) {
+            launchProfilePreset.disabled = !autoLaunchEnabled;
+          }
+          if (launchProfileDirectory) {
+            launchProfileDirectory.disabled = !autoLaunchEnabled;
           }
         };
         syncDebugger();
         autoLaunch.addEventListener("change", syncDebugger);
+      }
+      if (launchProfilePreset && launchProfileDirectory) {
+        launchProfilePreset.addEventListener("change", () => {
+          if (launchProfilePreset.value) {
+            launchProfileDirectory.value = launchProfilePreset.value;
+            if (launchUserDataDir && !launchUserDataDir.value && detectedUserDataDir) {
+              launchUserDataDir.value = detectedUserDataDir;
+            }
+          }
+        });
+      }
+      tbody.addEventListener("click", (event) => {
+        const target = event.target.closest("[data-advanced-toggle]");
+        if (!target) {
+          return;
+        }
+        const taskId = target.getAttribute("data-advanced-toggle");
+        if (!taskId) {
+          return;
+        }
+        const row = tbody.querySelector(`[data-advanced-row="${taskId}"]`);
+        if (!row) {
+          return;
+        }
+        const willOpen = row.classList.contains("hidden");
+        row.classList.toggle("hidden", !willOpen);
+        if (willOpen) {
+          advancedOpen.add(taskId);
+        } else {
+          advancedOpen.delete(taskId);
+        }
+      });
+
+      function restoreAdvancedRows() {
+        if (!advancedOpen.size) {
+          return;
+        }
+        const stale = [];
+        advancedOpen.forEach((taskId) => {
+          const row = tbody.querySelector(`[data-advanced-row="${taskId}"]`);
+          if (row) {
+            row.classList.remove("hidden");
+          } else {
+            stale.push(taskId);
+          }
+        });
+        stale.forEach((taskId) => advancedOpen.delete(taskId));
       }
       function isFormActive() {
         const active = document.activeElement;
@@ -847,6 +1081,7 @@ PAGE_TEMPLATE = """
           }
           const html = await response.text();
           tbody.innerHTML = html;
+          restoreAdvancedRows();
         } catch (err) {
           return;
         }
@@ -915,10 +1150,19 @@ LOG_TEMPLATE = """
 @app.get("/")
 def index():
     error = request.args.get("error", "")
+    detected_user_data_dir = detect_default_user_data_dir()
+    chrome_profiles = list_chrome_profiles(detected_user_data_dir)
     with TASKS_LOCK:
         tasks = sorted(TASKS.values(), key=lambda t: t.started_at, reverse=True)
     table_body = render_template_string(TABLE_BODY_TEMPLATE, tasks=tasks)
-    return render_template_string(PAGE_TEMPLATE, tasks=tasks, error=error, table_body=table_body)
+    return render_template_string(
+        PAGE_TEMPLATE,
+        tasks=tasks,
+        error=error,
+        table_body=table_body,
+        detected_user_data_dir=detected_user_data_dir,
+        chrome_profiles=chrome_profiles,
+    )
 
 
 @app.get("/tasks/rows")
@@ -933,6 +1177,9 @@ def start_bot():
     concert_url = (request.form.get("concert_url") or "").strip()
     button_text = (request.form.get("button_text") or "").strip()
     auto_launch = request.form.get("auto_launch") == "on"
+    launch_profile_preset = (request.form.get("launch_profile_preset") or "").strip()
+    launch_user_data_dir = (request.form.get("launch_user_data_dir") or "").strip()
+    launch_profile_directory = (request.form.get("launch_profile_directory") or "").strip()
     debugger_address = normalize_debugger_address(request.form.get("debugger_address"))
     open_new_tab = request.form.get("open_new_tab") == "on"
     close_on_exit = request.form.get("close_on_exit") == "on"
@@ -952,12 +1199,35 @@ def start_bot():
     ticket_quantity = 1
 
     task_id = uuid4().hex[:8]
-    user_data_dir = ""
     if auto_launch:
-        profile_dir = Path(__file__).parent / "chrome_profiles" / f"profile-{task_id}"
-        user_data_dir = str(profile_dir)
+        if launch_profile_preset and not launch_profile_directory:
+            launch_profile_directory = launch_profile_preset
+        if not launch_user_data_dir and launch_profile_directory:
+            launch_user_data_dir = detect_default_user_data_dir()
+        if launch_profile_directory and not launch_user_data_dir:
+            return redirect(url_for("index", error="User-data-dir tidak terdeteksi. Isi manual untuk profile Chrome yang dipilih."))
+
+        # Always use dedicated dir per task so Chrome starts a fresh process
+        # instead of delegating to an existing running Chrome instance.
+        isolated_dir = Path(__file__).parent / "chrome_profiles" / f"profile-{task_id}"
+        if launch_user_data_dir and launch_profile_directory:
+            src_profile = Path(os.path.expandvars(launch_user_data_dir)).expanduser() / launch_profile_directory
+            dst_profile = isolated_dir / launch_profile_directory
+            if src_profile.is_dir():
+                try:
+                    shutil.copytree(str(src_profile), str(dst_profile), dirs_exist_ok=True)
+                except Exception:
+                    dst_profile.mkdir(parents=True, exist_ok=True)
+            else:
+                dst_profile.mkdir(parents=True, exist_ok=True)
+        else:
+            isolated_dir.mkdir(parents=True, exist_ok=True)
+            launch_profile_directory = ""
+        user_data_dir = str(isolated_dir)
         debugger_address = ""
         open_new_tab = False
+    else:
+        user_data_dir = ""
 
     if debugger_address:
         with TASKS_LOCK:
@@ -975,11 +1245,12 @@ def start_bot():
         port = find_free_port(exclude_ports=exclude_ports)
         if not port:
             return redirect(url_for("index", error="Tidak menemukan port kosong untuk Chrome."))
-        _, err = launch_chrome(port, Path(user_data_dir), "about:blank")
+        _, err = launch_chrome(port, Path(user_data_dir), "about:blank", launch_profile_directory)
         if err:
             return redirect(url_for("index", error=f"Gagal buka Chrome: {err}"))
-        if not wait_for_port(port, timeout_seconds=15.0):
-            return redirect(url_for("index", error="Chrome tidak merespon port debugging."))
+        initial_delay = 1.5 if is_macos() else 0.5
+        if not wait_for_port(port, timeout_seconds=20.0, initial_delay=initial_delay):
+            return redirect(url_for("index", error="Chrome tidak merespon port debugging. Coba lagi atau buka Chrome manual."))
         debugger_address = f"127.0.0.1:{port}"
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -1000,6 +1271,7 @@ def start_bot():
         auto_detect_widget=auto_detect_widget,
         started_at=datetime.now(),
         user_data_dir=user_data_dir,
+        chrome_profile_directory=launch_profile_directory,
         log_path=log_path,
     )
     task.bot = SimpleButtonBot(
@@ -1091,6 +1363,29 @@ def resume_auto_buy(task_id: str):
     return redirect(url_for("index"))
 
 
+@app.post("/advanced/<task_id>")
+def update_advanced(task_id: str):
+    close_on_exit = request.form.get("close_on_exit") == "on"
+    aggressive_order = request.form.get("aggressive_order") == "on"
+    aggressive_click = request.form.get("aggressive_click") == "on"
+
+    with TASKS_LOCK:
+        task = TASKS.get(task_id)
+        if not task:
+            return redirect(url_for("index", error="Bot tidak ditemukan."))
+        task.close_on_exit = close_on_exit
+        task.aggressive_order = aggressive_order
+        task.aggressive_click = aggressive_click
+        bot = task.bot
+
+    if bot:
+        bot.close_on_exit = close_on_exit
+        bot.aggressive_order = aggressive_order
+        bot.aggressive_click = aggressive_click
+
+    return redirect(url_for("index"))
+
+
 
 @app.post("/chrome/<task_id>")
 def open_chrome(task_id: str):
@@ -1129,6 +1424,7 @@ def restart_bot(task_id: str):
     ticket_category = task.ticket_category
     ticket_quantity = task.ticket_quantity
     user_data_dir = task.user_data_dir or ""
+    chrome_profile_directory = task.chrome_profile_directory or ""
 
     if auto_launch:
         reuse_debugger = False
@@ -1150,11 +1446,27 @@ def restart_bot(task_id: str):
             port = find_free_port(exclude_ports=exclude_ports)
             if not port:
                 return redirect(url_for("index", error="Tidak menemukan port kosong untuk Chrome."))
-            _, err = launch_chrome(port, Path(user_data_dir), "about:blank")
+            # Use a fresh isolated user-data-dir for the restart
+            new_task_dir = Path(__file__).parent / "chrome_profiles" / f"profile-{task_id}-r{uuid4().hex[:4]}"
+            if user_data_dir and chrome_profile_directory:
+                src_profile = Path(user_data_dir) / chrome_profile_directory
+                dst_profile = new_task_dir / chrome_profile_directory
+                if src_profile.is_dir():
+                    try:
+                        shutil.copytree(str(src_profile), str(dst_profile), dirs_exist_ok=True)
+                    except Exception:
+                        dst_profile.mkdir(parents=True, exist_ok=True)
+                else:
+                    dst_profile.mkdir(parents=True, exist_ok=True)
+            else:
+                new_task_dir.mkdir(parents=True, exist_ok=True)
+            user_data_dir = str(new_task_dir)
+            _, err = launch_chrome(port, Path(user_data_dir), "about:blank", chrome_profile_directory)
             if err:
                 return redirect(url_for("index", error=f"Gagal buka Chrome: {err}"))
-            if not wait_for_port(port, timeout_seconds=15.0):
-                return redirect(url_for("index", error="Chrome tidak merespon port debugging."))
+            initial_delay = 1.5 if is_macos() else 0.5
+            if not wait_for_port(port, timeout_seconds=20.0, initial_delay=initial_delay):
+                return redirect(url_for("index", error="Chrome tidak merespon port debugging. Coba lagi atau buka Chrome manual."))
             debugger_address = f"127.0.0.1:{port}"
         open_new_tab = False
 
@@ -1194,6 +1506,7 @@ def restart_bot(task_id: str):
         task.stopped_at = None
         task.debugger_address = debugger_address
         task.open_new_tab = open_new_tab
+        task.chrome_profile_directory = chrome_profile_directory
 
     thread.start()
     return redirect(url_for("index"))
